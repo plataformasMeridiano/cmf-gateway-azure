@@ -86,7 +86,7 @@ app.http('cesion-prepare', {
                 nro_escritura:       req.nro_escritura        || null,
                 tipo_ganancias:      req.tipo_ganancias       || '6',
                 porcentaje_anticipo: req.porcentaje_anticipo  || 0,
-                porcentaje_garantia: req.porcentaje_garantia  || 0,
+                porcentaje_garantia: 100 - (req.porcentaje_anticipo || 0),
                 observaciones:       req.observaciones        || null,
                 letra:               req.letra,
                 prefijo:             req.prefijo,
