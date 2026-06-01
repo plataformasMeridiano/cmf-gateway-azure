@@ -96,6 +96,19 @@ function makeSupa() {
     );
 }
 
+// Extrae el texto visible de una pantalla Doors y lo adjunta al error
+function doorsError(step, body, url) {
+    const text = body
+        .replace(/<script[\s\S]*?<\/script>/gi, '')  // quitar JS
+        .replace(/<[^>]+>/g, ' ')
+        .replace(/&[a-z]+;/g, ' ')
+        .replace(/\s+/g, ' ')
+        .trim()
+        .slice(0, 400);
+    const suffix = url ? ` | URL: ${url}` : '';
+    return new Error(`Doors ${step} falló${suffix} | Pantalla: ${text}`);
+}
+
 // ── Pasos Doors ───────────────────────────────────────────────────────────────
 
 async function login(s) {
@@ -139,7 +152,7 @@ async function crearLiquidacion(s, lqf, row) {
     const fnBase = new URL('../finan_fn/', lqf + '/').href;
     await s.get(`${fnBase}ayu_fn_firmante.php?valor=${encodeURIComponent(row.cuit_deudor)}&validar=true`);
 
-    await s.post(`${lqf}/fac-pan2.php`, {
+    const r2 = await s.post(`${lqf}/fac-pan2.php`, {
         id: recId, CONF: '1', ABM: 'A', LIQ: '', PIMPCHE: '0',
         FECHA:      row.fecha_operacion_ddmmyyyy,
         CLIENTE:    row.cliente_codigo,
@@ -150,6 +163,10 @@ async function crearLiquidacion(s, lqf, row) {
         TIPO_RG:    row.tipo_ganancias   || '6',
         MONEDA_FAC: '1',
     });
+    // pan2 OK: debe mostrar el formulario de ítem (campo ABMITEM presente)
+    if (!r2.body.includes('ABMITEM')) {
+        throw doorsError('pan2 (cabecera)', r2.body);
+    }
 
     const r3 = await s.post(`${lqf}/fac-pan3.php`, {
         id: recId, CONF: '1', ABM: 'A', ABMITEM: '', ITEM: '', SCROLL: '',
@@ -166,7 +183,12 @@ async function crearLiquidacion(s, lqf, row) {
         FIR1_ANT: '',
         FIR1_NOM: row.razon_social,
     });
-
+    // pan3 OK: el ítem debe aparecer en la grilla
+    // Doors muestra el número sin ceros a la izquierda (ej: "1234" no "00001234")
+    const numeroSinCeros = row.numero ? String(parseInt(row.numero, 10)) : null;
+    if (numeroSinCeros && !r3.body.includes(numeroSinCeros)) {
+        throw doorsError('pan3 (ítem factura)', r3.body);
+    }
     // Detectar advertencia de factura duplicada en Doors
     const dupMatch = r3.body.match(/ya ingresado[^<]{0,100}/i);
     if (dupMatch) {
@@ -174,7 +196,11 @@ async function crearLiquidacion(s, lqf, row) {
     }
 
     // pan4: primer POST muestra confirmación, segundo POST confirma
-    const r4a    = await s.post(`${lqf}/fac-pan4.php`, { id: recId, ABM: 'A' });
+    const r4a = await s.post(`${lqf}/fac-pan4.php`, { id: recId, ABM: 'A' });
+    // pan4 primera pasada OK: debe mostrar formulario de confirmación con CONF y SUBMIT
+    if (!r4a.body.includes('name=\'CONF\'') && !r4a.body.includes('name="CONF"')) {
+        throw doorsError('pan4 (confirmación)', r4a.body);
+    }
     const valForm = (f) => {
         const m = r4a.body.match(new RegExp(`name=['"]${f}['"][^>]*value=['"]([^'"]*)['"']`));
         return m ? m[1] : '0';
@@ -187,7 +213,7 @@ async function crearLiquidacion(s, lqf, row) {
         GAS_ADM:          valForm('GAS_ADM'),
     });
     const m4 = r4.url.match(/msj=(\d+)/);
-    if (!m4) throw new Error(`No se obtuvo nro. liquidación de pan4. URL: ${r4.url}`);
+    if (!m4) throw doorsError('pan4 (submit)', r4.body, r4.url);
 
     return { recId, liqNum: m4[1] };
 }
