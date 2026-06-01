@@ -21,7 +21,7 @@ app.http('cesion-prepare', {
         try { req = await request.json(); }
         catch { return { status: 400, jsonBody: { ok: false, error: 'Body JSON inválido' } }; }
 
-        const required = ['jira_cesion_key','sociedad','cliente_codigo','fecha_operacion',
+        const required = ['jira_factura_key','sociedad','cliente_codigo','fecha_operacion',
                           'fecha_dep','letra','prefijo','numero','fecha_emision',
                           'importe_original','cuit_deudor','tasa_anual'];
         const missing = required.filter(f => req[f] == null || req[f] === '');
@@ -57,11 +57,11 @@ app.http('cesion-prepare', {
             };
         }
 
-        // Validar que no exista ya una row para este jira_cesion_key en estado no-error
+        // Validar que no exista ya una row para este jira_factura_key en estado no-error
         const { data: jiraRows } = await supa
             .from('doors_liquidaciones_facturas')
             .select('id, status')
-            .eq('jira_cesion_key', req.jira_cesion_key);
+            .eq('jira_factura_key', req.jira_factura_key);
 
         const dupJira = (jiraRows || []).find(r => !ERROR_STATUSES.includes(r.status));
         if (dupJira) {
@@ -69,7 +69,7 @@ app.http('cesion-prepare', {
                 status: 409,
                 jsonBody: {
                     ok:    false,
-                    error: `jira_cesion_key ${req.jira_cesion_key} ya tiene un proceso en curso (status: ${dupJira.status})`,
+                    error: `jira_factura_key ${req.jira_factura_key} ya tiene un proceso en curso (status: ${dupJira.status})`,
                     existing_id: dupJira.id,
                 },
             };
@@ -79,8 +79,8 @@ app.http('cesion-prepare', {
         const { data: row, error: ie } = await supa
             .from('doors_liquidaciones_facturas')
             .insert({
-                jira_cesion_key:     req.jira_cesion_key,
-                jira_factura_key:    req.jira_factura_key    || null,
+                jira_factura_key:    req.jira_factura_key,
+                jira_cesion_key:     req.jira_cesion_key     || null,
                 sociedad:            req.sociedad,
                 cliente_codigo:      req.cliente_codigo,
                 nro_escritura:       req.nro_escritura        || null,
@@ -113,16 +113,16 @@ app.http('cesion-prepare', {
         }
 
         // Encolar el probe
-        context.extraOutputs.set(probeQueue, JSON.stringify({ jira_cesion_key: req.jira_cesion_key }));
-        context.log('Probe encolado para:', req.jira_cesion_key);
+        context.extraOutputs.set(probeQueue, JSON.stringify({ jira_factura_key: req.jira_factura_key }));
+        context.log('Probe encolado para:', req.jira_factura_key);
 
         return {
             status: 200,
             jsonBody: {
-                ok:              true,
-                jira_cesion_key: req.jira_cesion_key,
-                status:          'probing',
-                id:              row.id,
+                ok:               true,
+                jira_factura_key: req.jira_factura_key,
+                status:           'probing',
+                id:               row.id,
             },
         };
     },

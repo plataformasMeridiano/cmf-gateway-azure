@@ -18,9 +18,9 @@ app.http('cesion-execute', {
         try { body = await request.json(); }
         catch { return { status: 400, jsonBody: { ok: false, error: 'Body JSON inválido' } }; }
 
-        const { jira_cesion_key } = body;
-        if (!jira_cesion_key) {
-            return { status: 400, jsonBody: { ok: false, error: 'jira_cesion_key es requerido' } };
+        const { jira_factura_key } = body;
+        if (!jira_factura_key) {
+            return { status: 400, jsonBody: { ok: false, error: 'jira_factura_key es requerido' } };
         }
 
         const supa = makeSupa();
@@ -29,11 +29,11 @@ app.http('cesion-execute', {
         const { data: row, error: re } = await supa
             .from('doors_liquidaciones_facturas')
             .select('*')
-            .eq('jira_cesion_key', jira_cesion_key)
+            .eq('jira_factura_key', jira_factura_key)
             .single();
 
         if (re || !row) {
-            return { status: 404, jsonBody: { ok: false, error: `No se encontró registro para ${jira_cesion_key}` } };
+            return { status: 404, jsonBody: { ok: false, error: `No se encontró registro para ${jira_factura_key}` } };
         }
 
         // Validar estado

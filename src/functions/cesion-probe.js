@@ -5,8 +5,8 @@ app.storageQueue('cesion-probe', {
     queueName:  'cesion-probe',
     connection: 'AzureWebJobsStorage',
     handler: async (message, context) => {
-        const { jira_cesion_key } = typeof message === 'string' ? JSON.parse(message) : message;
-        context.log('Probe iniciado para:', jira_cesion_key);
+        const { jira_factura_key } = typeof message === 'string' ? JSON.parse(message) : message;
+        context.log('Probe iniciado para:', jira_factura_key);
 
         const supa = makeSupa();
 
@@ -14,11 +14,11 @@ app.storageQueue('cesion-probe', {
         const { data: row, error: re } = await supa
             .from('doors_liquidaciones_facturas')
             .select('id, cliente_codigo, sociedad, status')
-            .eq('jira_cesion_key', jira_cesion_key)
+            .eq('jira_factura_key', jira_factura_key)
             .single();
 
         if (re || !row) {
-            context.error('Row no encontrada para:', jira_cesion_key);
+            context.error('Row no encontrada para:', jira_factura_key);
             return;
         }
 
@@ -41,7 +41,7 @@ app.storageQueue('cesion-probe', {
                 .update({ cesion_actual: cesionActual, status: 'ready' })
                 .eq('id', row.id);
 
-            context.log('Probe completado:', jira_cesion_key, '→ cesion_actual =', cesionActual);
+            context.log('Probe completado:', jira_factura_key, '→ cesion_actual =', cesionActual);
 
         } catch (error) {
             context.error('Error en probe:', error.message);
