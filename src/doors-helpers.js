@@ -135,6 +135,10 @@ async function crearLiquidacion(s, lqf, row) {
     if (!m0) throw new Error(`No se obtuvo ID en pan0. URL: ${r0.url}`);
     const recId = m0[1];
 
+    // Validar el CUIT del firmante en la sesión de Doors (requerido antes de pan3)
+    const fnBase = new URL('../finan_fn/', lqf + '/').href;
+    await s.get(`${fnBase}ayu_fn_firmante.php?valor=${encodeURIComponent(row.cuit_deudor)}&validar=true`);
+
     await s.post(`${lqf}/fac-pan2.php`, {
         id: recId, CONF: '1', ABM: 'A', LIQ: '', PIMPCHE: '0',
         FECHA:      row.fecha_operacion_ddmmyyyy,
@@ -147,7 +151,7 @@ async function crearLiquidacion(s, lqf, row) {
         MONEDA_FAC: '1',
     });
 
-    await s.post(`${lqf}/fac-pan3.php`, {
+    const r3 = await s.post(`${lqf}/fac-pan3.php`, {
         id: recId, CONF: '1', ABM: 'A', ABMITEM: '', ITEM: '', SCROLL: '',
         LET:     row.letra,
         PREF:    row.prefijo,
@@ -162,6 +166,12 @@ async function crearLiquidacion(s, lqf, row) {
         FIR1_ANT: '',
         FIR1_NOM: row.razon_social,
     });
+
+    // Detectar advertencia de factura duplicada en Doors
+    const dupMatch = r3.body.match(/ya ingresado[^<]{0,100}/i);
+    if (dupMatch) {
+        throw new Error(`Factura ${row.prefijo}-${row.numero} ya existe en Doors (${dupMatch[0].trim().slice(0, 120)})`);
+    }
 
     // pan4: primer POST muestra confirmación, segundo POST confirma
     const r4a    = await s.post(`${lqf}/fac-pan4.php`, { id: recId, ABM: 'A' });
