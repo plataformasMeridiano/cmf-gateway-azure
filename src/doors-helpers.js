@@ -82,9 +82,20 @@ function lqfBase(sociedad) {
     return `${SERVER}/${map[sociedad]}/finan_lqf`;
 }
 
-function parseDate(ddmmyyyy) {
-    const [d, m, y] = ddmmyyyy.split('-');
+function parseDate(input) {
+    if (!input) return null;
+    if (/^\d{4}-\d{2}-\d{2}/.test(input)) return input.slice(0, 10);
+    const [d, m, y] = input.split('-');
     return `${y}-${m}-${d}`;
+}
+
+function toDdMmYyyy(input) {
+    if (!input) return '';
+    if (/^\d{4}-\d{2}-\d{2}/.test(input)) {
+        const [y, m, d] = input.split('T')[0].split('-');
+        return `${d}-${m}-${y}`;
+    }
+    return input;
 }
 
 function makeSupa() {
@@ -163,7 +174,7 @@ async function actualizarTasa(s, clienteCodigo, cesionNumero, tasa) {
 }
 
 module.exports = {
-    DoorsSession, lqfBase, parseDate, makeSupa,
+    DoorsSession, lqfBase, parseDate, toDdMmYyyy, makeSupa,
     login, lookupFirmante, getMaxCesion,
     crearLiquidacion, descargarYSubirPdf, actualizarTasa,
     DOORS_USER,
