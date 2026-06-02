@@ -1,5 +1,5 @@
 const { app, output } = require('@azure/functions');
-const { makeSupa, parseDate, DOORS_USER } = require('../doors-helpers');
+const { makeSupa, parseDate, toDdMmYyyy, DOORS_USER } = require('../doors-helpers');
 
 const probeQueue = output.storageQueue({
     queueName:  'cesion-probe',
@@ -101,9 +101,9 @@ app.http('cesion-prepare', {
                 fecha_emision:       parseDate(req.fecha_emision),
                 fecha_dep:           parseDate(req.fecha_dep),
                 // Guardamos las fechas en DD-MM-YYYY para pasarlas a Doors en execute
-                fecha_operacion_ddmmyyyy: req.fecha_operacion,
-                fecha_emision_ddmmyyyy:   req.fecha_emision,
-                fecha_dep_ddmmyyyy:       req.fecha_dep,
+                fecha_operacion_ddmmyyyy: toDdMmYyyy(req.fecha_operacion),
+                fecha_emision_ddmmyyyy:   toDdMmYyyy(req.fecha_emision),
+                fecha_dep_ddmmyyyy:       toDdMmYyyy(req.fecha_dep),
                 importe_original:    req.importe_original,
                 cuit_deudor:         req.cuit_deudor,
                 tasa_anual:          req.tasa_anual,
