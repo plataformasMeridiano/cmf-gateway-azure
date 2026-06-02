@@ -28,6 +28,12 @@ app.http('cesion-prepare', {
         if (missing.length) {
             return { status: 400, jsonBody: { ok: false, error: `Campos requeridos: ${missing.join(', ')}` } };
         }
+        // Normalizar sociedad desde nombres completos de JSM
+        const s = (req.sociedad || '').toUpperCase();
+        if      (s.includes('MANCIA'))                              req.sociedad = 'Mancia';
+        else if (s.includes('MERIDIANO') && !s.includes('CLINICAL')) req.sociedad = 'Meridiano';
+        else if (s.includes('PAMAT'))                               req.sociedad = 'Pamat';
+
         if (!['Meridiano', 'Pamat', 'Mancia'].includes(req.sociedad)) {
             return { status: 400, jsonBody: { ok: false, error: `sociedad inválida: ${req.sociedad}` } };
         }
