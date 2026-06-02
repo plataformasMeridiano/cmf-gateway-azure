@@ -8,6 +8,8 @@
   },
   "dependencies": {
     "@azure/functions": "^4.0.0",
+    "@azure/identity": "^4.0.0",
+    "@azure/keyvault-secrets": "^4.0.0",
     "@supabase/supabase-js": "^2.0.0",
     "ws": "^8.21.0"
   },
