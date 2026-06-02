@@ -109,7 +109,7 @@ function doorsError(step, body, url) {
     return new Error(`Doors ${step} falló${suffix} | Pantalla: ${text}`);
 }
 
-// ── Pasos Doors ───────────────────────────────────────────────────────────────
+// ── Pasos Doors (SANDBOX: lookupFirmante/getMaxCesion/crearLiquidacion/PDF/tasa mockeados) ──
 
 async function login(s) {
     await s.get(`${MNPC}/sisdoors/index.php`);
@@ -121,140 +121,45 @@ async function login(s) {
 }
 
 async function lookupFirmante(s, sociedad, cuit) {
-    const base   = lqfBase(sociedad);
-    const fnBase = new URL('../finan_fn/', base + '/').href;
-    const r      = await s.get(`${fnBase}ayu_fn_firmante.php?valor=${encodeURIComponent(cuit)}&validar=true`);
-    const data   = JSON.parse(r.body);
-    if (data.ERROR) throw new Error(`CUIT ${cuit} no encontrado en Doors`);
-    return data.DES;
+    return `MOCK RAZÓN SOCIAL (${cuit})`;
 }
 
 async function getMaxCesion(s, clienteCodigo) {
-    const cc  = `${MNPC}/finan_cc`;
-    const pad = clienteCodigo.padStart(5, '0');
-    for (let n = 50; n >= 1; n--) {
-        const id = `1.04.${pad}.${String(n).padStart(3, '0')}`;
-        const r  = await s.post(`${cc}/adicxcta-abm.php`, {
-            ID: id, ABM: 'M', PAGINA: `${MNPC}/finan_cc/adicxcta-ini.php?`,
-        });
-        if (r.body.includes('TASA_ACT_CIE')) return n;
-    }
-    return 0;
+    // sbx: deriva el max cesion de los registros reales en Supabase
+    const supa = makeSupa();
+    const { data } = await supa
+        .from('doors_liquidaciones_facturas')
+        .select('cesion_numero')
+        .eq('cliente_codigo', clienteCodigo)
+        .eq('status', 'ok')
+        .order('cesion_numero', { ascending: false })
+        .limit(1);
+    return (data && data.length > 0 && data[0].cesion_numero) ? data[0].cesion_numero : 0;
 }
 
 async function crearLiquidacion(s, lqf, row) {
-    const r0  = await s.post(`${lqf}/fac-pan0.php`, { CONF: '1' });
-    const m0  = r0.url.match(/[?&]id=(\d+)/);
-    if (!m0) throw new Error(`No se obtuvo ID en pan0. URL: ${r0.url}`);
-    const recId = m0[1];
-
-    // Validar el CUIT del firmante en la sesión de Doors (requerido antes de pan3)
-    const fnBase = new URL('../finan_fn/', lqf + '/').href;
-    await s.get(`${fnBase}ayu_fn_firmante.php?valor=${encodeURIComponent(row.cuit_deudor)}&validar=true`);
-
-    const r2 = await s.post(`${lqf}/fac-pan2.php`, {
-        id: recId, CONF: '1', ABM: 'A', LIQ: '', PIMPCHE: '0',
-        FECHA:      row.fecha_operacion_ddmmyyyy,
-        CLIENTE:    row.cliente_codigo,
-        NROESC:     row.nro_escritura    || '',
-        MONTO:      String(row.porcentaje_anticipo || 0),
-        GARANTIA:   String(row.porcentaje_garantia || 0),
-        OBS:        row.observaciones    || '',
-        TIPO_RG:    row.tipo_ganancias   || '6',
-        MONEDA_FAC: '1',
-    });
-    // pan2 OK: debe mostrar el formulario de ítem (campo ABMITEM presente)
-    if (!r2.body.includes('ABMITEM')) {
-        throw doorsError('pan2 (cabecera)', r2.body);
-    }
-
-    const r3 = await s.post(`${lqf}/fac-pan3.php`, {
-        id: recId, CONF: '1', ABM: 'A', ABMITEM: '', ITEM: '', SCROLL: '',
-        LET:     row.letra,
-        PREF:    row.prefijo,
-        NUM:     row.numero,
-        FECDEP:  row.fecha_dep_ddmmyyyy,
-        FECEMI:  row.fecha_emision_ddmmyyyy,
-        IMPORTE: String(row.importe_original),
-        PORIVA:  '0',
-        NETO:    String(row.importe_original),
-        VALCAR: '', MAV: '', IMP_ME: '',
-        FIR1:     row.cuit_deudor,
-        FIR1_ANT: '',
-        FIR1_NOM: row.razon_social,
-    });
-    // pan3 OK: el ítem debe aparecer en la grilla
-    // Doors muestra el número sin ceros a la izquierda (ej: "1234" no "00001234")
-    const numeroSinCeros = row.numero ? String(parseInt(row.numero, 10)) : null;
-    if (numeroSinCeros && !r3.body.includes(numeroSinCeros)) {
-        throw doorsError('pan3 (ítem factura)', r3.body);
-    }
-    // Detectar advertencia de factura duplicada en Doors
-    const dupMatch = r3.body.match(/ya ingresado[^<]{0,100}/i);
-    if (dupMatch) {
-        throw new Error(`Factura ${row.prefijo}-${row.numero} ya existe en Doors (${dupMatch[0].trim().slice(0, 120)})`);
-    }
-
-    // pan4: primer POST muestra confirmación, segundo POST confirma
-    const r4a = await s.post(`${lqf}/fac-pan4.php`, { id: recId, ABM: 'A' });
-    // pan4 primera pasada OK: debe mostrar formulario de confirmación con CONF y SUBMIT
-    if (!r4a.body.includes('name=\'CONF\'') && !r4a.body.includes('name="CONF"')) {
-        throw doorsError('pan4 (confirmación)', r4a.body);
-    }
-    const valForm = (f) => {
-        const m = r4a.body.match(new RegExp(`name=['"]${f}['"][^>]*value=['"]([^'"]*)['"']`));
-        return m ? m[1] : '0';
-    };
-
-    const r4 = await s.post(`${lqf}/fac-pan4.php`, {
-        id: recId, ABM: 'A', CONF: '1', SUBMIT: '1',
-        RETGAN_NUEVA_USU: valForm('RETGAN_NUEVA_USU'),
-        GAS_BAN:          valForm('GAS_BAN'),
-        GAS_ADM:          valForm('GAS_ADM'),
-    });
-    const m4 = r4.url.match(/msj=(\d+)/);
-    if (!m4) throw doorsError('pan4 (submit)', r4.body, r4.url);
-
-    return { recId, liqNum: m4[1] };
+    // sbx mock — genera número en rango 99000-99999 para no colisionar con Doors real
+    const supa = makeSupa();
+    const { data } = await supa
+        .from('doors_liquidaciones_facturas')
+        .select('doors_liq_numero')
+        .gte('doors_liq_numero', '99000')
+        .lte('doors_liq_numero', '99999')
+        .order('doors_liq_numero', { ascending: false })
+        .limit(1);
+    const last  = (data && data.length > 0) ? parseInt(data[0].doors_liq_numero, 10) : 99000;
+    const liqNum = String(last + 1);
+    return { recId: 'SBX-REC', liqNum };
 }
 
+
 async function descargarYSubirPdf(s, lqf, liqNum, sociedad, supa) {
-    const r = await s.get(`${lqf}/fac-pdf.php?ID=${liqNum}**SW_INT=1**SW_GAS=1`, true);
-    if (!(r.headers['content-type'] || '').includes('application/pdf')) {
-        throw new Error(`Respuesta no es PDF: ${r.headers['content-type']}`);
-    }
-    const path = `${sociedad.toLowerCase()}/${liqNum}.pdf`;
-    const { error } = await supa.storage.from(STORAGE_BUCKET).upload(path, r.body, {
-        contentType: 'application/pdf',
-    });
-    if (error) throw new Error(`Storage upload: ${error.message}`);
-    return path;
+    // sbx mock — referencia un PDF real existente sin descargar nada de Doors
+    return 'meridiano/47987.pdf';
 }
 
 async function actualizarTasa(s, clienteCodigo, cesionNumero, tasa) {
-    const cc     = `${MNPC}/finan_cc`;
-    const pad    = clienteCodigo.padStart(5, '0');
-    const id     = `1.04.${pad}.${String(cesionNumero).padStart(3, '0')}`;
-    const pagina = `${MNPC}/finan_cc/adicxcta-ini.php?`;
-
-    const r = await s.post(`${cc}/adicxcta-abm.php`, { ID: id, ABM: 'M', PAGINA: pagina });
-    if (!r.body.includes('TASA_ACT_CIE')) throw new Error(`Cuenta ${id} no encontrada en adicxcta`);
-
-    const val = (field) => {
-        const m = r.body.match(new RegExp(`name=["']${field}["'][^>]*value=["']([^"']*)["']`));
-        return m ? m[1] : '0.00';
-    };
-
-    await s.post(`${cc}/adicxcta-abm.php`, {
-        ID: id, ABM: 'M', CONF: '1', PAGINA: pagina, atras: '1',
-        TASA_LIQ:     val('TASA_LIQ'),
-        PGAS1_LIQ:    val('PGAS1_LIQ'),
-        PGAS2_LIQ:    val('PGAS2_LIQ'),
-        TASA_ACT_CIE: String(tasa),
-        ID_ACT_CIE:   val('ID_ACT_CIE'),
-        TASA_PAS_CIE: val('TASA_PAS_CIE'),
-        ID_PAS_CIE:   val('ID_PAS_CIE'),
-    });
+    // sbx mock — no toca Doors
 }
 
 module.exports = {
