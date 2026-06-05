@@ -36,19 +36,25 @@ app.storageQueue('cesion-probe', {
             const cesionActual = await getMaxCesion(s, row.cliente_codigo);
             context.log('cesion_actual:', cesionActual, 'para cliente:', row.cliente_codigo);
 
-            await supa
+            const { error: ue } = await supa
                 .from('doors_liquidaciones_facturas')
                 .update({ cesion_actual: cesionActual, status: 'ready' })
                 .eq('id', row.id);
 
+            if (ue) throw new Error(`Supabase update (ready): ${ue.message}`);
             context.log('Probe completado:', jira_factura_key, '→ cesion_actual =', cesionActual);
 
         } catch (error) {
             context.error('Error en probe:', error.message);
-            await supa
-                .from('doors_liquidaciones_facturas')
-                .update({ status: 'error_probe', error_msg: error.message })
-                .eq('id', row.id);
+            try {
+                const { error: ue } = await supa
+                    .from('doors_liquidaciones_facturas')
+                    .update({ status: 'error_probe', error_msg: error.message })
+                    .eq('id', row.id);
+                if (ue) context.error('No se pudo actualizar error_probe en Supabase:', ue.message);
+            } catch (supaError) {
+                context.error('Excepción al actualizar error_probe en Supabase:', supaError.message);
+            }
         }
     },
 });
