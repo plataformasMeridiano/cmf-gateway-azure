@@ -8,6 +8,7 @@
   },
   "dependencies": {
     "@azure/functions": "^4.0.0",
+    "@azure/storage-queue": "^12.30.0",
     "@supabase/supabase-js": "^2.0.0",
     "ws": "^8.21.0"
   },
