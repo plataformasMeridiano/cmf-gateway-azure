@@ -1,16 +1,21 @@
-const { app, output } = require('@azure/functions');
+const { app } = require('@azure/functions');
+const { QueueServiceClient } = require('@azure/storage-queue');
 const { makeSupa, parseDate, toDdMmYyyy, DOORS_USER } = require('../doors-helpers');
 
-const probeQueue = output.storageQueue({
-    queueName:  'cesion-probe',
-    connection: 'AzureWebJobsStorage',
-});
+// Encola el mensaje del probe de forma directa (con await), para poder detectar
+// y reportar fallos de encolado en lugar de dejar la fila en 'probing' sin disparador.
+async function enqueueProbe(jiraFacturaKey) {
+    const queueClient = QueueServiceClient
+        .fromConnectionString(process.env.AzureWebJobsStorage)
+        .getQueueClient('cesion-probe');
+    const message = Buffer.from(JSON.stringify({ jira_factura_key: jiraFacturaKey })).toString('base64');
+    await queueClient.sendMessage(message);
+}
 
 app.http('cesion-prepare', {
     methods:      ['POST'],
     route:        'cesion/prepare',
     authLevel:    'anonymous',
-    extraOutputs: [probeQueue],
     handler: async (request, context) => {
         const key = request.headers.get('x-internal-key');
         if (!key || key !== process.env.CMF_INTERNAL_GATEWAY_KEY) {
@@ -118,9 +123,15 @@ app.http('cesion-prepare', {
             return { status: 500, jsonBody: { ok: false, error: `Supabase: ${ie.message}` } };
         }
 
-        // Encolar el probe
-        context.extraOutputs.set(probeQueue, JSON.stringify({ jira_factura_key: req.jira_factura_key }));
-        context.log('Probe encolado para:', req.jira_factura_key);
+        // Encolar el probe — si falla, no dejamos la fila huérfana en 'probing'
+        try {
+            await enqueueProbe(req.jira_factura_key);
+            context.log('Probe encolado para:', req.jira_factura_key);
+        } catch (qe) {
+            context.error('Error al encolar el probe:', qe.message);
+            await supa.from('doors_liquidaciones_facturas').delete().eq('id', row.id);
+            return { status: 500, jsonBody: { ok: false, error: `No se pudo encolar el probe: ${qe.message}` } };
+        }
 
         return {
             status: 200,
