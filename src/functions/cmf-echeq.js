@@ -102,12 +102,12 @@ app.http('cmf-echeq', {
 
       const token = await getCmfBearerToken(context);
 
-      const qs = new URLSearchParams({ '$select': body.select });
-      if (body.filter)  qs.set('$filter',  body.filter);
-      if (body.orderby) qs.set('$orderby', body.orderby);
-      if (body.pag)     qs.set('$pag',     body.pag);
+      const parts = [`$select=${encodeURIComponent(body.select)}`];
+      if (body.filter)  parts.push(`$filter=${encodeURIComponent(body.filter)}`);
+      if (body.orderby) parts.push(`$orderby=${encodeURIComponent(body.orderby)}`);
+      if (body.pag)     parts.push(`$pag=${encodeURIComponent(body.pag)}`);
 
-      const cmfUrl = `${process.env.CMF_BASE_URL}/cmf/cheques/v2/cheques/ListaCheques?${qs}`;
+      const cmfUrl = `${process.env.CMF_BASE_URL}/cmf/cheques/v2/cheques/ListaCheques?${parts.join('&')}`;
       context.log('CMF echeq URL:', cmfUrl);
 
       const cmfResponse = await httpsRequest({
