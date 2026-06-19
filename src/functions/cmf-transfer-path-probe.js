@@ -9,7 +9,8 @@ let cmfTokenCache = {
 };
 
 function makeSupa() {
-    return createClient(process.env.SUPABASE_URL, process.env.SUPABASE_KEY);
+    return createClient(process.env.SUPABASE_URL, process.env.SUPABASE_KEY,
+        { realtime: { transport: require('ws') } });
 }
 
 async function logRequest(endpoint, request, cmfResponse, errorMsg) {
