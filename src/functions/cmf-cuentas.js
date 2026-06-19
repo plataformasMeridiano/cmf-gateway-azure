@@ -13,7 +13,7 @@ function makeSupa() {
     { realtime: { transport: require('ws') } });
 }
 
-async function logRequest(endpoint, request, cmfResponse, errorMsg) {
+async function logRequest(endpoint, request, cmfResponse, errorMsg, url) {
   try {
     const supa = makeSupa();
     await supa.from('cmf_requests_log').insert({
@@ -25,6 +25,7 @@ async function logRequest(endpoint, request, cmfResponse, errorMsg) {
       cmf_desc:   cmfResponse?.body?.respuesta?.descripcion || null,
       cmf_body:   typeof cmfResponse?.body === 'object' ? cmfResponse.body : null,
       error_msg:  errorMsg   || null,
+      url:        url        || null,
     });
   } catch { /* no interrumpir el flujo si falla el log */ }
 }
@@ -166,7 +167,7 @@ app.http('cmf-cuentas', {
         }
       });
 
-      await logRequest('cmf-cuentas', null, cmfResponse, null);
+      await logRequest('cmf-cuentas', null, cmfResponse, null, request.url);
 
       return {
         status: cmfResponse.statusCode,
@@ -178,7 +179,7 @@ app.http('cmf-cuentas', {
       };
     } catch (error) {
       context.error('Error en cmf-cuentas', error);
-      await logRequest('cmf-cuentas', null, null, error.message);
+      await logRequest('cmf-cuentas', null, null, error.message, request.url);
 
       return {
         status: 500,

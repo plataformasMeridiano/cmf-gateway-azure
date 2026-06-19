@@ -13,7 +13,7 @@ function makeSupa() {
     { realtime: { transport: require('ws') } });
 }
 
-async function logRequest(endpoint, request, cmfResponse, errorMsg) {
+async function logRequest(endpoint, request, cmfResponse, errorMsg, url) {
   try {
     const supa = makeSupa();
     await supa.from('cmf_requests_log').insert({
@@ -25,6 +25,7 @@ async function logRequest(endpoint, request, cmfResponse, errorMsg) {
       cmf_desc:   cmfResponse?.body?.respuesta?.descripcion || null,
       cmf_body:   typeof cmfResponse?.body === 'object' ? cmfResponse.body : null,
       error_msg:  errorMsg   || null,
+      url:        url        || null,
     });
   } catch { /* no interrumpir el flujo si falla el log */ }
 }
@@ -145,7 +146,7 @@ app.http('cmf-echeq', {
       const cmfDescription = cmfResponse?.body?.respuesta?.descripcion || null;
       const ok             = cmfResponse.statusCode >= 200 && cmfResponse.statusCode < 300;
 
-      await logRequest('cmf-echeq', body, cmfResponse, null);
+      await logRequest('cmf-echeq', body, cmfResponse, null, request.url);
 
       return {
         status: 200,
@@ -153,7 +154,7 @@ app.http('cmf-echeq', {
       };
     } catch (error) {
       context.error('Error en cmf-echeq', error);
-      await logRequest('cmf-echeq', null, null, error.message);
+      await logRequest('cmf-echeq', null, null, error.message, request.url);
       return { status: 500, jsonBody: { ok: false, source: 'AZURE', error: error.message } };
     }
   }

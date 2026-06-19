@@ -13,7 +13,7 @@ function makeSupa() {
         { realtime: { transport: require('ws') } });
 }
 
-async function logRequest(endpoint, request, cmfResponse, errorMsg) {
+async function logRequest(endpoint, request, cmfResponse, errorMsg, url) {
     try {
         const supa = makeSupa();
         await supa.from('cmf_requests_log').insert({
@@ -25,6 +25,7 @@ async function logRequest(endpoint, request, cmfResponse, errorMsg) {
             cmf_desc:   cmfResponse?.body?.respuesta?.descripcion || null,
             cmf_body:   typeof cmfResponse?.body === 'object' ? cmfResponse.body : null,
             error_msg:  errorMsg   || null,
+            url:        url        || null,
         });
     } catch { /* no interrumpir el flujo si falla el log */ }
 }
@@ -200,7 +201,7 @@ app.http('cmf-transfer-path-probe', {
                 }
             }
 
-            await logRequest('cmf-transfer-path-probe', payload, { statusCode: 200, body: { results } }, null);
+            await logRequest('cmf-transfer-path-probe', payload, { statusCode: 200, body: { results } }, null, request.url);
 
             return {
                 status: 200,
@@ -213,7 +214,7 @@ app.http('cmf-transfer-path-probe', {
             };
         } catch (error) {
             context.error('Error en cmf-transfer-path-probe', error);
-            await logRequest('cmf-transfer-path-probe', null, null, error.message);
+            await logRequest('cmf-transfer-path-probe', null, null, error.message, request.url);
             return {
                 status: 500,
                 jsonBody: {
