@@ -1,11 +1,32 @@
 const { app } = require('@azure/functions');
 const https = require('https');
 const querystring = require('querystring');
+const { createClient } = require('@supabase/supabase-js');
 
 let cmfTokenCache = {
   accessToken: null,
   expiresAt: 0
 };
+
+function makeSupa() {
+  return createClient(process.env.SUPABASE_URL, process.env.SUPABASE_KEY);
+}
+
+async function logRequest(endpoint, request, cmfResponse, errorMsg) {
+  try {
+    const supa = makeSupa();
+    await supa.from('cmf_requests_log').insert({
+      endpoint,
+      ok:         cmfResponse ? cmfResponse.statusCode >= 200 && cmfResponse.statusCode < 300 : false,
+      request:    request    || null,
+      cmf_status: cmfResponse?.statusCode  || null,
+      cmf_code:   cmfResponse?.body?.respuesta?.codigo      || null,
+      cmf_desc:   cmfResponse?.body?.respuesta?.descripcion || null,
+      cmf_body:   typeof cmfResponse?.body === 'object' ? cmfResponse.body : null,
+      error_msg:  errorMsg   || null,
+    });
+  } catch { /* no interrumpir el flujo si falla el log */ }
+}
 
 function httpsRequest({ method, url, headers = {}, body = null, timeoutMs = 30000 }) {
   return new Promise((resolve, reject) => {
@@ -168,6 +189,8 @@ app.http('cmf-validate-destination', {
       const cmfCode = cmfResponse?.body?.respuesta?.codigo || null;
       const cmfDescription = cmfResponse?.body?.respuesta?.descripcion || null;
 
+      await logRequest('cmf-validate-destination', { alias_cbu_cvu: aliasCbuCvu }, cmfResponse, null);
+
       return {
         status: 200,
         jsonBody: {
@@ -183,6 +206,7 @@ app.http('cmf-validate-destination', {
       };
     } catch (error) {
       context.error('Error en cmf-validate-destination', error);
+      await logRequest('cmf-validate-destination', null, null, error.message);
 
       return {
         status: 500,
