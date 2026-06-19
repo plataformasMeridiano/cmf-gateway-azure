@@ -1,11 +1,32 @@
 const { app } = require('@azure/functions');
 const https = require('https');
 const querystring = require('querystring');
+const { createClient } = require('@supabase/supabase-js');
 
 let cmfTokenCache = {
   accessToken: null,
   expiresAt: 0
 };
+
+function makeSupa() {
+  return createClient(process.env.SUPABASE_URL, process.env.SUPABASE_KEY);
+}
+
+async function logRequest(endpoint, request, cmfResponse, errorMsg) {
+  try {
+    const supa = makeSupa();
+    await supa.from('cmf_requests_log').insert({
+      endpoint,
+      ok:         cmfResponse ? cmfResponse.statusCode >= 200 && cmfResponse.statusCode < 300 : false,
+      request:    request    || null,
+      cmf_status: cmfResponse?.statusCode  || null,
+      cmf_code:   cmfResponse?.body?.respuesta?.codigo      || null,
+      cmf_desc:   cmfResponse?.body?.respuesta?.descripcion || null,
+      cmf_body:   typeof cmfResponse?.body === 'object' ? cmfResponse.body : null,
+      error_msg:  errorMsg   || null,
+    });
+  } catch { /* no interrumpir el flujo si falla el log */ }
+}
 
 function httpsRequest({ method, url, headers = {}, body = null, timeoutMs = 45000 }) {
   return new Promise((resolve, reject) => {
@@ -121,20 +142,17 @@ app.http('cmf-echeq', {
 
       const cmfCode        = cmfResponse?.body?.respuesta?.codigo      || null;
       const cmfDescription = cmfResponse?.body?.respuesta?.descripcion || null;
+      const ok             = cmfResponse.statusCode >= 200 && cmfResponse.statusCode < 300;
+
+      await logRequest('cmf-echeq', body, cmfResponse, null);
 
       return {
         status: 200,
-        jsonBody: {
-          ok:              cmfResponse.statusCode >= 200 && cmfResponse.statusCode < 300,
-          source:          'CMF',
-          cmf_status:      cmfResponse.statusCode,
-          cmf_code:        cmfCode,
-          cmf_description: cmfDescription,
-          data:            cmfResponse.body
-        }
+        jsonBody: { ok, source: 'CMF', cmf_status: cmfResponse.statusCode, cmf_code: cmfCode, cmf_description: cmfDescription, data: cmfResponse.body }
       };
     } catch (error) {
       context.error('Error en cmf-echeq', error);
+      await logRequest('cmf-echeq', null, null, error.message);
       return { status: 500, jsonBody: { ok: false, source: 'AZURE', error: error.message } };
     }
   }
