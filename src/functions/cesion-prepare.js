@@ -28,10 +28,13 @@ app.http('cesion-prepare', {
 
         const required = ['jira_factura_key','sociedad','cliente_codigo','fecha_operacion',
                           'fecha_dep','letra','prefijo','numero','fecha_emision',
-                          'importe_original','cuit_deudor','tasa_anual'];
+                          'importe_original','cuit_deudor','tasa_anual','tipo_documento'];
         const missing = required.filter(f => req[f] == null || req[f] === '');
         if (missing.length) {
             return { status: 400, jsonBody: { ok: false, error: `Campos requeridos: ${missing.join(', ')}` } };
+        }
+        if (!['FC', 'NC', 'ND'].includes(req.tipo_documento)) {
+            return { status: 400, jsonBody: { ok: false, error: `tipo_documento inválido: ${req.tipo_documento}. Debe ser FC, NC o ND` } };
         }
         // Normalizar sociedad desde nombres completos de JSM
         const s = (req.sociedad || '').toUpperCase();
@@ -90,15 +93,17 @@ app.http('cesion-prepare', {
         const { data: row, error: ie } = await supa
             .from('doors_liquidaciones_facturas')
             .insert({
-                jira_factura_key:    req.jira_factura_key,
-                jira_cesion_key:     req.jira_cesion_key     || null,
-                sociedad:            req.sociedad,
-                cliente_codigo:      req.cliente_codigo,
-                nro_escritura:       req.nro_escritura        || null,
-                tipo_ganancias:      req.tipo_ganancias       || '6',
-                porcentaje_anticipo: req.porcentaje_anticipo  || 0,
-                porcentaje_garantia: 100 - (req.porcentaje_anticipo || 0),
-                observaciones:       req.observaciones        || null,
+                jira_factura_key:     req.jira_factura_key,
+                jira_cesion_key:      req.jira_cesion_key      || null,
+                sociedad:             req.sociedad,
+                cliente_codigo:       req.cliente_codigo,
+                nro_escritura:        req.nro_escritura         || null,
+                tipo_ganancias:       req.tipo_ganancias        || '6',
+                tipo_documento:       req.tipo_documento,
+                porcentaje_anticipo:  req.porcentaje_anticipo   || 0,
+                porcentaje_garantia:  100 - (req.porcentaje_anticipo || 0),
+                monto_anticipo_total: req.monto_anticipo_total  || null,
+                observaciones:        req.observaciones         || null,
                 letra:               req.letra,
                 prefijo:             req.prefijo,
                 numero:              req.numero,
