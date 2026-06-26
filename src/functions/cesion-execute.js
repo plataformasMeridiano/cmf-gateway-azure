@@ -45,22 +45,6 @@ app.http('cesion-execute', {
             return { status: 422, jsonBody: { ok: false, error: `Documentos con error de probe: ${conErrorProbe.map(r => r.jira_factura_key).join(', ')}` } };
         }
 
-        // Si todo ya está ok, devolver resumen
-        if (rows.every(r => r.status === 'ok')) {
-            return {
-                status: 200,
-                jsonBody: {
-                    ok: true, already_done: true,
-                    facturas: rows.filter(r => r.tipo_documento === 'FC').map(r => ({
-                        jira_factura_key: r.jira_factura_key,
-                        doors_liq_numero: r.doors_liq_numero,
-                        cesion_numero:    r.cesion_numero,
-                        pdf_filename:     r.pdf_filename,
-                    })),
-                },
-            };
-        }
-
         // Separar FC de NC/ND
         const facturas = rows.filter(r => r.tipo_documento === 'FC');
         const notas    = rows.filter(r => r.tipo_documento !== 'FC');
