@@ -55,6 +55,7 @@ app.http('cesion-execute', {
                         jira_factura_key: r.jira_factura_key,
                         doors_liq_numero: r.doors_liq_numero,
                         cesion_numero:    r.cesion_numero,
+                        pdf_filename:     r.pdf_filename,
                     })),
                 },
             };
@@ -109,7 +110,7 @@ app.http('cesion-execute', {
 
                 if (factura.status === 'ok') {
                     context.log(`Factura ${factura.jira_factura_key} ya procesada, saltando`);
-                    resultados.push({ jira_factura_key: factura.jira_factura_key, doors_liq_numero: factura.doors_liq_numero, cesion_numero: factura.cesion_numero, skipped: true });
+                    resultados.push({ jira_factura_key: factura.jira_factura_key, doors_liq_numero: factura.doors_liq_numero, cesion_numero: factura.cesion_numero, pdf_filename: factura.pdf_filename, skipped: true });
                     continue;
                 }
 
@@ -146,7 +147,7 @@ app.http('cesion-execute', {
                         error_msg:        null,
                     }).eq('id', factura.id);
 
-                    resultados.push({ jira_factura_key: factura.jira_factura_key, doors_liq_numero: liqNum, cesion_numero: cesionNumero });
+                    resultados.push({ jira_factura_key: factura.jira_factura_key, doors_liq_numero: liqNum, cesion_numero: cesionNumero, pdf_filename: pdfPath });
 
                 } catch (facturaError) {
                     context.error(`Error procesando ${factura.jira_factura_key}:`, facturaError.message);
