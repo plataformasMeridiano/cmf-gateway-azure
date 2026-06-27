@@ -9,8 +9,10 @@ app.http('cesion-execute', {
     route:     'cesion/execute',
     authLevel: 'anonymous',
     handler: async (request, context) => {
-        const key = request.headers.get('x-internal-key');
-        if (!key || key !== process.env.CMF_INTERNAL_GATEWAY_KEY) {
+        const key    = request.headers.get('x-internal-key');
+        const isMock = key && key === process.env.CMF_INTERNAL_GATEWAY_KEY_SBX;
+        const isReal = key && key === process.env.CMF_INTERNAL_GATEWAY_KEY;
+        if (!isMock && !isReal) {
             return { status: 401, jsonBody: { ok: false, error: 'Unauthorized' } };
         }
 
@@ -21,6 +23,20 @@ app.http('cesion-execute', {
         const { jira_cesion_key } = body;
         if (!jira_cesion_key) {
             return { status: 400, jsonBody: { ok: false, error: 'jira_cesion_key es requerido' } };
+        }
+
+        if (isMock) {
+            return {
+                status: 200,
+                jsonBody: {
+                    ok: true,
+                    facturas: [
+                        { ok: true,  jira_factura_key: jira_cesion_key + '-FC1', doors_liq_numero: '99001', cesion_numero: 51, pdf_filename: 'meridiano/47987.pdf', skipped: false, error_msg: null },
+                        { ok: true,  jira_factura_key: jira_cesion_key + '-FC2', doors_liq_numero: '99000', cesion_numero: 50, pdf_filename: 'meridiano/47987.pdf', skipped: true,  error_msg: null },
+                        { ok: false, jira_factura_key: jira_cesion_key + '-FC3', doors_liq_numero: null,    cesion_numero: null, pdf_filename: null,                skipped: false, error_msg: 'SBX mock: Doors timeout al crear liquidación' },
+                    ],
+                },
+            };
         }
 
         const supa = makeSupa();
