@@ -90,6 +90,7 @@ app.http('cesion-execute', {
         });
 
         // Ajuste por diferencia entre monto_aprobado (escritura) y suma de % por factura
+        const ajustes = [];
         if (montoAprobadoRaw != null) {
             const montoAprobado  = parseFloat(montoAprobadoRaw);
             const totalCalculado = facturasConMontos.reduce((s, f) => s + f.monto_anticipo, 0);
@@ -99,9 +100,11 @@ app.http('cesion-execute', {
                 const ajuste = diferencia > 0
                     ? Math.min(diferencia, Math.round((f.importe_efectivo - f.monto_anticipo) * 100) / 100)
                     : Math.max(diferencia, -f.monto_anticipo);
+                const anterior   = f.monto_anticipo;
                 f.monto_anticipo = Math.round((f.monto_anticipo + ajuste) * 100) / 100;
                 f.monto_garantia = Math.round((f.importe_efectivo - f.monto_anticipo) * 100) / 100;
                 diferencia       = Math.round((diferencia - ajuste) * 100) / 100;
+                ajustes.push({ jira_factura_key: f.jira_factura_key, monto_anticipo_anterior: anterior, monto_anticipo_nuevo: f.monto_anticipo });
             }
         }
 
@@ -192,7 +195,7 @@ app.http('cesion-execute', {
 
             return {
                 status: 200,
-                jsonBody: { ok: true, facturas: resultados },
+                jsonBody: { ok: true, facturas: resultados, ajustes },
             };
 
         } catch (error) {
