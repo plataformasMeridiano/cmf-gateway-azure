@@ -3,7 +3,7 @@ const http        = require('http');
 const https       = require('https');
 const querystring = require('querystring');
 
-const SERVER         = 'http://mancia3.dynns.com:82';
+const SERVER         = 'http://mancia3.login-erp.com:82';
 const MNPC           = `${SERVER}/mnpc`;
 const BASIC_AUTH     = 'Basic ' + Buffer.from('mancia:mnpc1909').toString('base64');
 const DOORS_USER     = 'ADucet';
