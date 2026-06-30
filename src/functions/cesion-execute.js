@@ -20,7 +20,7 @@ app.http('cesion-execute', {
         try { body = await request.json(); }
         catch { return { status: 400, jsonBody: { ok: false, error: 'Body JSON inválido' } }; }
 
-        const { jira_cesion_key } = body;
+        const { jira_cesion_key, monto_aprobado: montoAprobadoRaw } = body;
         if (!jira_cesion_key) {
             return { status: 400, jsonBody: { ok: false, error: 'jira_cesion_key es requerido' } };
         }
@@ -88,6 +88,22 @@ app.http('cesion-execute', {
             const montoGarantia = Math.round((importeEfectivo - montoAnticipo) * 100) / 100;
             return { ...r, importe_efectivo: importeEfectivo, monto_anticipo: montoAnticipo, monto_garantia: montoGarantia };
         });
+
+        // Ajuste por diferencia entre monto_aprobado (escritura) y suma de % por factura
+        if (montoAprobadoRaw != null) {
+            const montoAprobado  = parseFloat(montoAprobadoRaw);
+            const totalCalculado = facturasConMontos.reduce((s, f) => s + f.monto_anticipo, 0);
+            let diferencia = Math.round((montoAprobado - totalCalculado) * 100) / 100;
+            for (let i = facturasConMontos.length - 1; i >= 0 && Math.abs(diferencia) >= 0.01; i--) {
+                const f    = facturasConMontos[i];
+                const ajuste = diferencia > 0
+                    ? Math.min(diferencia, Math.round((f.importe_efectivo - f.monto_anticipo) * 100) / 100)
+                    : Math.max(diferencia, -f.monto_anticipo);
+                f.monto_anticipo = Math.round((f.monto_anticipo + ajuste) * 100) / 100;
+                f.monto_garantia = Math.round((f.importe_efectivo - f.monto_anticipo) * 100) / 100;
+                diferencia       = Math.round((diferencia - ajuste) * 100) / 100;
+            }
+        }
 
         // cesion_actual: el probe guarda el mismo valor para todos los docs de la operación
         const cesionBase = rows[0].cesion_actual || 0;
