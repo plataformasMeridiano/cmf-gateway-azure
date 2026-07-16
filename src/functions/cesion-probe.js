@@ -10,22 +10,21 @@ app.storageQueue('cesion-probe', {
 
         const supa = makeSupa();
 
-        // Leer la row de Supabase
-        const { data: row, error: re } = await supa
+        // Leer la row de Supabase — filtrar por status='probing' y tomar la más reciente
+        // (evita fallo silencioso de .single() si hay duplicados por re-prepare)
+        const { data: rows, error: re } = await supa
             .from('doors_liquidaciones_facturas')
             .select('id, cliente_codigo, sociedad, status')
             .eq('jira_factura_key', jira_factura_key)
-            .single();
+            .eq('status', 'probing')
+            .order('created_at', { ascending: false })
+            .limit(1);
 
-        if (re || !row) {
-            context.error('Row no encontrada para:', jira_factura_key);
+        if (re || !rows?.length) {
+            context.log('No hay row en probing para:', jira_factura_key, '— ignorando');
             return;
         }
-
-        if (row.status !== 'probing') {
-            context.log('Row no está en probing, ignorando. Status:', row.status);
-            return;
-        }
+        const row = rows[0];
 
         const s = new DoorsSession();
 
