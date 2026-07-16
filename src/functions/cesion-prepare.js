@@ -61,12 +61,15 @@ app.http('cesion-prepare', {
 
         const dup = (facRows || []).find(r => !ERROR_STATUSES.includes(r.status));
         if (dup) {
+            // Idempotente: ya existe en estado válido, devolver como éxito
             return {
-                status: 409,
+                status: 200,
                 jsonBody: {
-                    ok:    false,
-                    error: `Factura ya registrada (liq. Doors ${dup.doors_liq_numero || 'pendiente'}, status: ${dup.status})`,
-                    existing_id: dup.id,
+                    ok:               true,
+                    jira_factura_key: req.jira_factura_key,
+                    status:           dup.status,
+                    id:               dup.id,
+                    already_exists:   true,
                 },
             };
         }
@@ -79,12 +82,15 @@ app.http('cesion-prepare', {
 
         const dupJira = (jiraRows || []).find(r => !ERROR_STATUSES.includes(r.status));
         if (dupJira) {
+            // Idempotente: mismo jira_factura_key ya en curso, devolver como éxito
             return {
-                status: 409,
+                status: 200,
                 jsonBody: {
-                    ok:    false,
-                    error: `jira_factura_key ${req.jira_factura_key} ya tiene un proceso en curso (status: ${dupJira.status})`,
-                    existing_id: dupJira.id,
+                    ok:               true,
+                    jira_factura_key: req.jira_factura_key,
+                    status:           dupJira.status,
+                    id:               dupJira.id,
+                    already_exists:   true,
                 },
             };
         }
