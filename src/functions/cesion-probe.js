@@ -10,11 +10,10 @@ app.storageQueue('cesion-probe', {
 
         const supa = makeSupa();
 
-        // Leer la row de Supabase — filtrar por status='probing' y tomar la más reciente
-        // (evita fallo silencioso de .single() si hay duplicados por re-prepare)
+        // Leer el row en probing (toma el más reciente si hubo re-prepare con duplicados)
         const { data: rows, error: re } = await supa
             .from('doors_liquidaciones_facturas')
-            .select('id, cliente_codigo, sociedad, status')
+            .select('id, jira_cesion_key, cliente_codigo, status')
             .eq('jira_factura_key', jira_factura_key)
             .eq('status', 'probing')
             .order('created_at', { ascending: false })
@@ -26,6 +25,28 @@ app.storageQueue('cesion-probe', {
         }
         const row = rows[0];
 
+        // Si la cesión tiene jira_cesion_key, reusar cesion_actual ya calculado por un hermano
+        // (evita abrir N sesiones a Doors en paralelo para el mismo cliente)
+        if (row.jira_cesion_key) {
+            const { data: hermanos } = await supa
+                .from('doors_liquidaciones_facturas')
+                .select('cesion_actual')
+                .eq('jira_cesion_key', row.jira_cesion_key)
+                .not('cesion_actual', 'is', null)
+                .limit(1);
+
+            if (hermanos?.length) {
+                const cesionActual = hermanos[0].cesion_actual;
+                context.log(`Reutilizando cesion_actual=${cesionActual} de hermano para ${jira_factura_key}`);
+                await supa
+                    .from('doors_liquidaciones_facturas')
+                    .update({ cesion_actual: cesionActual, status: 'ready' })
+                    .eq('id', row.id);
+                return;
+            }
+        }
+
+        // Primero en llegar (o sin jira_cesion_key): abre Doors y calcula
         const s = new DoorsSession();
 
         try {
@@ -46,13 +67,12 @@ app.storageQueue('cesion-probe', {
         } catch (error) {
             context.error('Error en probe:', error.message);
             try {
-                const { error: ue } = await supa
+                await supa
                     .from('doors_liquidaciones_facturas')
                     .update({ status: 'error_probe', error_msg: error.message })
                     .eq('id', row.id);
-                if (ue) context.error('No se pudo actualizar error_probe en Supabase:', ue.message);
             } catch (supaError) {
-                context.error('Excepción al actualizar error_probe en Supabase:', supaError.message);
+                context.error('Excepción al actualizar error_probe:', supaError.message);
             }
         }
     },

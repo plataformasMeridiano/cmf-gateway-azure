@@ -145,12 +145,22 @@ async function lookupFirmante(s, sociedad, cuit) {
 async function getMaxCesion(s, clienteCodigo) {
     const cc  = `${MNPC}/finan_cc`;
     const pad = clienteCodigo.padStart(5, '0');
-    for (let n = 50; n >= 1; n--) {
+
+    const existe = async (n) => {
         const id = `1.04.${pad}.${String(n).padStart(3, '0')}`;
         const r  = await s.post(`${cc}/adicxcta-abm.php`, {
             ID: id, ABM: 'M', PAGINA: `${MNPC}/finan_cc/adicxcta-ini.php?`,
         });
-        if (r.body.includes('TASA_ACT_CIE')) return n;
+        return r.body.includes('TASA_ACT_CIE');
+    };
+
+    // Hallar el bloque de 50 que contiene el máximo: escalar de a 50 hasta no encontrar
+    let techo = 50;
+    while (techo <= 500 && await existe(techo)) techo += 50;
+
+    // Escanear hacia abajo dentro del bloque [techo-50 .. techo-1]
+    for (let n = techo - 1; n >= Math.max(1, techo - 50); n--) {
+        if (await existe(n)) return n;
     }
     return 0;
 }
@@ -188,9 +198,9 @@ async function crearLiquidacion(s, lqf, row) {
         NUM:     row.numero,
         FECDEP:  row.fecha_dep_ddmmyyyy,
         FECEMI:  row.fecha_emision_ddmmyyyy,
-        IMPORTE: String(row.importe_original),
+        IMPORTE: String(row.importe_efectivo ?? row.importe_original),
         PORIVA:  '0',
-        NETO:    String(row.importe_original),
+        NETO:    String(row.importe_efectivo ?? row.importe_original),
         VALCAR: '', MAV: '', IMP_ME: '',
         FIR1:     row.cuit_deudor,
         FIR1_ANT: '',
