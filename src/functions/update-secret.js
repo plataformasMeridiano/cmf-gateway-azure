@@ -41,7 +41,11 @@ app.http("update-secret", {
       return { status: 400, jsonBody: { error: "secret_name y secret_value son requeridos" } };
     }
 
-    if (!ALLOWED_SECRETS.has(secretName)) {
+    // Whitelist: ALYCs (lista fija) + cuentas bancarias (prefijo BANCO-).
+    // Los secrets de bancos se llaman BANCO-{BANCO}-{ENTIDAD}-PASSWORD y se
+    // aceptan por prefijo para no tener que enumerar cada cuenta.
+    const isAllowed = ALLOWED_SECRETS.has(secretName) || secretName.startsWith("BANCO-");
+    if (!isAllowed) {
       return { status: 403, jsonBody: { error: `'${secretName}' no está en la lista de secrets permitidos` } };
     }
 
