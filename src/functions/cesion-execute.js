@@ -20,7 +20,9 @@ app.http('cesion-execute', {
         try { body = await request.json(); }
         catch { return { status: 400, jsonBody: { ok: false, error: 'Body JSON inválido' } }; }
 
-        const { jira_cesion_key, monto_aprobado: montoAprobadoRaw } = body;
+        const { jira_cesion_key } = body;
+        const montoAprobadoRaw    = (body.monto_aprobado      != null && body.monto_aprobado      !== '') ? body.monto_aprobado      : null;
+        const porcentajeOverride  = (body.porcentaje_anticipo != null && body.porcentaje_anticipo !== '') ? parseFloat(body.porcentaje_anticipo) : null;
         if (!jira_cesion_key) {
             return { status: 400, jsonBody: { ok: false, error: 'jira_cesion_key es requerido' } };
         }
@@ -31,9 +33,9 @@ app.http('cesion-execute', {
                 jsonBody: {
                     ok: true,
                     facturas: [
-                        { ok: true,  jira_factura_key: jira_cesion_key + '-FC1', doors_liq_numero: '99001', cesion_numero: 51, pdf_filename: 'meridiano/47987.pdf', skipped: false, error_msg: null },
-                        { ok: true,  jira_factura_key: jira_cesion_key + '-FC2', doors_liq_numero: '99000', cesion_numero: 50, pdf_filename: 'meridiano/47987.pdf', skipped: true,  error_msg: null },
-                        { ok: false, jira_factura_key: jira_cesion_key + '-FC3', doors_liq_numero: null,    cesion_numero: null, pdf_filename: null,                skipped: false, error_msg: 'SBX mock: Doors timeout al crear liquidación' },
+                        { ok: true,  jira_factura_key: jira_cesion_key + '-FC1', doors_liq_numero: '99001', cesion_numero: 51, pdf_filename: 'meridiano/47987.pdf', monto_anticipo: 50000,  skipped: false, error_msg: null },
+                        { ok: true,  jira_factura_key: jira_cesion_key + '-FC2', doors_liq_numero: '99000', cesion_numero: 50, pdf_filename: 'meridiano/47987.pdf', monto_anticipo: 30000,  skipped: true,  error_msg: null },
+                        { ok: false, jira_factura_key: jira_cesion_key + '-FC3', doors_liq_numero: null,    cesion_numero: null, pdf_filename: null,                monto_anticipo: null,   skipped: false, error_msg: 'SBX mock: Doors timeout al crear liquidación' },
                     ],
                 },
             };
@@ -77,34 +79,36 @@ app.http('cesion-execute', {
             parseFloat(r.importe_original) > parseFloat(max.importe_original) ? r : max
         );
 
-        // Calcular importe_efectivo y monto_anticipo por factura
+        // importe_efectivo: la factura de mayor importe absorbe el ajuste de NC/ND
         const facturasConMontos = facturas.map(r => {
             const importeOriginal = parseFloat(r.importe_original || 0);
             const importeEfectivo = r.id === maxFactura.id
                 ? importeOriginal - totalNotas
                 : importeOriginal;
-            const pct           = parseFloat(r.porcentaje_anticipo || 0);
-            const montoAnticipo = Math.round(importeEfectivo * pct / 100 * 100) / 100;
-            const montoGarantia = Math.round((importeEfectivo - montoAnticipo) * 100) / 100;
-            return { ...r, importe_efectivo: importeEfectivo, monto_anticipo: montoAnticipo, monto_garantia: montoGarantia };
+            return { ...r, importe_efectivo: importeEfectivo };
         });
 
-        // Ajuste por diferencia entre monto_aprobado (escritura) y suma de % por factura
-        const ajustes = [];
         if (montoAprobadoRaw != null) {
-            const montoAprobado  = parseFloat(montoAprobadoRaw);
-            const totalCalculado = facturasConMontos.reduce((s, f) => s + f.monto_anticipo, 0);
-            let diferencia = Math.round((montoAprobado - totalCalculado) * 100) / 100;
-            for (let i = facturasConMontos.length - 1; i >= 0 && Math.abs(diferencia) >= 0.01; i--) {
-                const f    = facturasConMontos[i];
-                const ajuste = diferencia > 0
-                    ? Math.min(diferencia, Math.round((f.importe_efectivo - f.monto_anticipo) * 100) / 100)
-                    : Math.max(diferencia, -f.monto_anticipo);
-                const anterior   = f.monto_anticipo;
-                f.monto_anticipo = Math.round((f.monto_anticipo + ajuste) * 100) / 100;
+            // Modo monto (cesión con escritura): prorratear monto_aprobado proporcional a importe_efectivo
+            const montoAprobado = parseFloat(montoAprobadoRaw);
+            const totalEfectivo = facturasConMontos.reduce((s, f) => s + f.importe_efectivo, 0);
+            let acumulado = 0;
+            for (let i = 0; i < facturasConMontos.length; i++) {
+                const f        = facturasConMontos[i];
+                const esUltima = i === facturasConMontos.length - 1;
+                const monto    = esUltima
+                    ? Math.round((montoAprobado - acumulado) * 100) / 100
+                    : Math.round(montoAprobado * f.importe_efectivo / totalEfectivo * 100) / 100;
+                f.monto_anticipo = Math.max(0, Math.min(monto, f.importe_efectivo));
                 f.monto_garantia = Math.round((f.importe_efectivo - f.monto_anticipo) * 100) / 100;
-                diferencia       = Math.round((diferencia - ajuste) * 100) / 100;
-                ajustes.push({ jira_factura_key: f.jira_factura_key, monto_anticipo_anterior: anterior, monto_anticipo_nuevo: f.monto_anticipo });
+                acumulado        = Math.round((acumulado + f.monto_anticipo) * 100) / 100;
+            }
+        } else {
+            // Modo % (factoring): porcentajeOverride del body, o porcentaje_anticipo de cada factura
+            for (const f of facturasConMontos) {
+                const pct        = porcentajeOverride != null ? porcentajeOverride : parseFloat(f.porcentaje_anticipo || 0);
+                f.monto_anticipo = Math.round(f.importe_efectivo * pct / 100 * 100) / 100;
+                f.monto_garantia = Math.round((f.importe_efectivo - f.monto_anticipo) * 100) / 100;
             }
         }
 
@@ -129,7 +133,7 @@ app.http('cesion-execute', {
 
                 if (factura.status === 'ok') {
                     context.log(`Factura ${factura.jira_factura_key} ya procesada, saltando`);
-                    resultados.push({ ok: true, jira_factura_key: factura.jira_factura_key, doors_liq_numero: factura.doors_liq_numero, cesion_numero: factura.cesion_numero, pdf_filename: factura.pdf_filename, skipped: true, error_msg: null });
+                    resultados.push({ ok: true, jira_factura_key: factura.jira_factura_key, doors_liq_numero: factura.doors_liq_numero, cesion_numero: factura.cesion_numero, pdf_filename: factura.pdf_filename, monto_anticipo: factura.monto_anticipo, skipped: true, error_msg: null });
                     continue;
                 }
 
@@ -166,7 +170,7 @@ app.http('cesion-execute', {
                         error_msg:        null,
                     }).eq('id', factura.id);
 
-                    resultados.push({ ok: true, jira_factura_key: factura.jira_factura_key, doors_liq_numero: liqNum, cesion_numero: cesionNumero, pdf_filename: pdfPath, skipped: false, error_msg: null });
+                    resultados.push({ ok: true, jira_factura_key: factura.jira_factura_key, doors_liq_numero: liqNum, cesion_numero: cesionNumero, pdf_filename: pdfPath, monto_anticipo: factura.monto_anticipo, skipped: false, error_msg: null });
 
                 } catch (facturaError) {
                     context.error(`Error procesando ${factura.jira_factura_key}:`, facturaError.message);
@@ -180,7 +184,7 @@ app.http('cesion-execute', {
                         error_msg: facturaError.message,
                     }).eq('id', factura.id);
 
-                    resultados.push({ ok: false, jira_factura_key: factura.jira_factura_key, doors_liq_numero: null, cesion_numero: null, pdf_filename: null, skipped: false, error_msg: facturaError.message });
+                    resultados.push({ ok: false, jira_factura_key: factura.jira_factura_key, doors_liq_numero: null, cesion_numero: null, pdf_filename: null, monto_anticipo: factura.monto_anticipo, skipped: false, error_msg: facturaError.message });
                 }
             }
 
@@ -195,7 +199,7 @@ app.http('cesion-execute', {
 
             return {
                 status: 200,
-                jsonBody: { ok: true, facturas: resultados, ajustes },
+                jsonBody: { ok: true, facturas: resultados },
             };
 
         } catch (error) {
