@@ -212,11 +212,8 @@ async function crearLiquidacion(s, lqf, row) {
     if (numeroSinCeros && !r3.body.includes(numeroSinCeros)) {
         throw doorsError('pan3 (ítem factura)', r3.body);
     }
-    // Detectar advertencia de factura duplicada en Doors
-    const dupMatch = r3.body.match(/ya ingresado[^<]{0,100}/i);
-    if (dupMatch) {
-        throw new Error(`Factura ${row.prefijo}-${row.numero} ya existe en Doors (${dupMatch[0].trim().slice(0, 120)})`);
-    }
+    // Detectar advertencia de factura duplicada en Doors (puede ser de otro cliente — el caller decide)
+    const dupWarning = !!(r3.body.match(/ya ingresado[^<]{0,100}/i));
 
     // pan4: primer POST muestra confirmación, segundo POST confirma
     const r4a = await s.post(`${lqf}/fac-pan4.php`, { id: recId, ABM: 'A' });
@@ -238,7 +235,7 @@ async function crearLiquidacion(s, lqf, row) {
     const m4 = r4.url.match(/msj=(\d+)/);
     if (!m4) throw doorsError('pan4 (submit)', r4.body, r4.url);
 
-    return { recId, liqNum: m4[1] };
+    return { recId, liqNum: m4[1], dupWarning };
 }
 
 async function descargarYSubirPdf(s, lqf, liqNum, sociedad, supa) {

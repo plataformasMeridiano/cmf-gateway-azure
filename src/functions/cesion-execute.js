@@ -149,7 +149,25 @@ app.http('cesion-execute', {
 
                     const result = await crearLiquidacion(s, lqf, rowParaDoors);
                     recId        = result.recId;
-                    const { liqNum } = result;
+                    const { liqNum, dupWarning } = result;
+
+                    if (dupWarning) {
+                        // Doors dice "ya ingresado" — verificar si somos nosotros o es otro cliente
+                        const { data: prevRows } = await supa
+                            .from('doors_liquidaciones_facturas')
+                            .select('id, jira_factura_key, doors_liq_numero, status')
+                            .eq('sociedad', factura.sociedad)
+                            .eq('letra',    factura.letra)
+                            .eq('prefijo',  factura.prefijo)
+                            .eq('numero',   factura.numero)
+                            .neq('id', factura.id);
+                        const prev = (prevRows || []).find(r => !['error', 'error_probe'].includes(r.status));
+                        if (prev) {
+                            throw new Error(`Factura ya registrada por nosotros en Doors (liq. ${prev.doors_liq_numero}, ${prev.jira_factura_key})`);
+                        }
+                        context.log(`Advertencia Doors "ya ingresado" ignorada para ${factura.jira_factura_key} — no está en nuestra base`);
+                    }
+
                     context.log(`Liquidación creada para ${factura.jira_factura_key}:`, liqNum);
 
                     const pdfPath = await descargarYSubirPdf(s, lqf, liqNum, factura.sociedad, supa);
