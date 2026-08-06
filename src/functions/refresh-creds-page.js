@@ -45,6 +45,25 @@ const ASSETS_TOKEN = process.env.ATLASSIAN_ASSETS_TOKEN || "";          // Asset
 const ASSETS_BASE = `https://api.atlassian.com/jsm/assets/workspace/${WORKSPACE_ID}/v1`;
 const CONFLUENCE_BASE = `https://api.atlassian.com/ex/confluence/${CLOUD_ID}/rest/api`;
 
+// URL de login por ALYC. No está en Assets (el objeto "Alycs" solo tiene Nombre y
+// Estado), así que se mantiene acá, alineado con el url_login de
+// DescargaBoletos/config.json, que es lo que realmente usan los scrapers.
+// Para los bancos NO hace falta: la URL sale del atributo del objeto "Cuentas Meridiano".
+const URLS_ALYC = {
+  "ADCAP": "https://micuenta2.ad-cap.com.ar/ehomedmz/vbhome/login.html#!/login",
+  "Allaria": "https://allaria-ssl.allaria.com.ar/AllariaOnline/VBolsaNet/login.html#!/login",
+  "BACS": "https://alyc.torontoinversiones.com.ar/VBhome/login.html#!/login",
+  "ConoSur": "https://virtualbroker-conosur.aunesa.com/auth/signin",
+  "Criteria": "https://clientes.criteria.com.ar/vbHome/login.html#!/login",
+  "DA Valores": "https://clientes.davalores.com.ar/VBHome/login.html#!/login",
+  "Dhalmore": "https://clientes.dhalmorecap.com/",
+  "IEB": "https://clientesv2.invertirenbolsa.com.ar/",
+  "Max Capital": "https://home.max.capital/",
+  "Metrocorp": "https://be.bancocmf.com.ar/",
+  "Puente": "https://puentenet.com/usuario/login",
+  "Win": "https://login.winsa.com.ar/",
+};
+
 // Qué se genera en cada página
 const TARGETS = {
   alycs: {
@@ -53,6 +72,7 @@ const TARGETS = {
     columna: "ALyC",
     // atributo de referencia al "dueño" del usuario, para agrupar las filas
     refAttrs: ["ALyC", "Alyc"],
+    urls: URLS_ALYC,          // la URL viene de este mapa
     // Filas que no salen de Assets y hay que preservar (gestión manual)
     manuales: [
       ["Petrini", "Usuario"], ["Petrini", "Contraseña"],
@@ -66,6 +86,7 @@ const TARGETS = {
     pageId: process.env.CONFLUENCE_BANCOS_PAGE_ID || "157908993",
     columna: "Banco",
     refAttrs: ["Cuenta"],
+    urlDesdeRef: true,        // la URL sale del objeto "Cuentas Meridiano" referenciado
     manuales: [],
   },
 };
@@ -143,6 +164,13 @@ function refLabelDe(obj, nombres) {
   return String(v?.referencedObject?.label ?? v?.displayValue ?? "").trim();
 }
 
+/** Id del objeto referenciado (para ir a buscarle atributos, ej. la URL del banco). */
+function refIdDe(obj, nombres) {
+  const v = attrOf(obj, nombres)?.objectAttributeValues?.[0];
+  const id = v?.referencedObject?.id;
+  return id ? String(id) : "";
+}
+
 // ── Key Vault ─────────────────────────────────────────────────────────────────
 
 async function leerSecret(nombre) {
@@ -213,6 +241,7 @@ async function filasDe(target, ctx) {
     cuentas.push({
       id,
       base: refLabelDe(obj, target.refAttrs) || valorDe(obj, ["Name"]) || `objeto ${id}`,
+      refId: refIdDe(obj, target.refAttrs),
       nombre: valorDe(obj, ["Name"]),
       perfil: valorDe(obj, ["Tipo perfil"]),
       usuario: valorDe(obj, ["Usuario"]),
@@ -242,7 +271,26 @@ async function filasDe(target, ctx) {
   }
 
   // 3) Armar las filas, trayendo los valores del vault
+  const urlCache = {};   // refId → URL (para no pedir el mismo banco N veces)
+  const conPagina = new Set();
+
   for (const c of cuentas) {
+    // Fila "Página": una sola por entidad base (no por cada cuenta)
+    if (!conPagina.has(c.base)) {
+      let url = target.urls ? (target.urls[c.base] || "") : "";
+      if (!url && target.urlDesdeRef && c.refId) {
+        if (!(c.refId in urlCache)) {
+          try {
+            const ref = await assetsGet(`${ASSETS_BASE}/object/${c.refId}?includeAttributes=true`);
+            urlCache[c.refId] = valorDe(ref, ["URL", "Url", "Página", "Pagina"]);
+          } catch { urlCache[c.refId] = ""; }
+        }
+        url = urlCache[c.refId];
+      }
+      if (url) filas.push({ entidad: c.base, campo: "Página", valor: url });
+      conPagina.add(c.base);
+    }
+
     if (!c.secretId) {
       if (c.usuario) filas.push({ entidad: c.entidad, campo: "Usuario", valor: c.usuario });
       avisos.push(`${c.entidad}: objeto Assets ${c.id} sin 'Secret ID' — no puedo traer la clave`);
@@ -277,8 +325,8 @@ async function filasDe(target, ctx) {
     }
   }
 
-  // Orden estable: por entidad y con Usuario → Contraseña → DNI
-  const ordenCampo = { "Usuario": 0, "Contraseña": 1, "DNI / CUIT": 2 };
+  // Orden estable: por entidad y con Página → Usuario → Contraseña → DNI
+  const ordenCampo = { "Página": 0, "Usuario": 1, "Contraseña": 2, "DNI / CUIT": 3 };
   filas.sort((a, b) =>
     a.entidad.localeCompare(b.entidad, "es") ||
     (ordenCampo[a.campo] ?? 9) - (ordenCampo[b.campo] ?? 9));
