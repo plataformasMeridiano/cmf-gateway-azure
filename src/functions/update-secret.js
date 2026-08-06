@@ -41,10 +41,22 @@ app.http("update-secret", {
       return { status: 400, jsonBody: { error: "secret_name y secret_value son requeridos" } };
     }
 
-    // Whitelist: ALYCs (lista fija) + cuentas bancarias (prefijo BANCO-).
-    // Los secrets de bancos se llaman BANCO-{BANCO}-{ENTIDAD}-PASSWORD y se
-    // aceptan por prefijo para no tener que enumerar cada cuenta.
-    const isAllowed = ALLOWED_SECRETS.has(secretName) || secretName.startsWith("BANCO-");
+    // Whitelist:
+    //  - ALYCs: lista fija.
+    //  - Cuentas bancarias: prefijo BANCO- (BANCO-{BANCO}-{ENTIDAD}-PASSWORD),
+    //    se aceptan por prefijo para no enumerar cada cuenta.
+    //  - DNI/CUIT: los portales con 3 identificadores (usuario + DNI + clave)
+    //    guardan el DNI en {X}-DOCUMENTO. Se permite si su {X}-PASSWORD ya está
+    //    permitido, así no hay que enumerar el -DOCUMENTO de cada ALYC.
+    const isDocumentoDeSecretPermitido =
+      secretName.endsWith("-DOCUMENTO") &&
+      ALLOWED_SECRETS.has(secretName.replace(/-DOCUMENTO$/, "-PASSWORD"));
+
+    const isAllowed =
+      ALLOWED_SECRETS.has(secretName) ||
+      secretName.startsWith("BANCO-") ||
+      isDocumentoDeSecretPermitido;
+
     if (!isAllowed) {
       return { status: 403, jsonBody: { error: `'${secretName}' no está en la lista de secrets permitidos` } };
     }
