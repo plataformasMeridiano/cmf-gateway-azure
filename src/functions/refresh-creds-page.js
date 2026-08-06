@@ -18,9 +18,15 @@ const { ManagedIdentityCredential } = require("@azure/identity");
  *
  * Auth: Function key (x-functions-key), igual que update-secret.
  *
+ * Ojo con la autenticación: son DOS mecanismos distintos.
+ *   • Confluence → token "with scopes" (ATSTT…) como **Bearer** vía api.atlassian.com.
+ *   • Assets     → token clásico (ATATT…) con **Basic email:token**, y además exige
+ *                  el header `X-Atlassian-Token: no-check` (sin él, AQL da 403).
+ *
  * Env vars:
- *   ATLASSIAN_API_TOKEN         token "with scopes" (Bearer vía api.atlassian.com).
- *                               Necesita scopes de Confluence (write) y de Assets (read).
+ *   ATLASSIAN_API_TOKEN         token "with scopes" para Confluence (Bearer)
+ *   ATLASSIAN_ASSETS_TOKEN      token clásico ATATT… para Assets (Basic con ATLASSIAN_EMAIL)
+ *   ATLASSIAN_EMAIL             email de la cuenta dueña del token de Assets
  *   ATLASSIAN_CLOUD_ID          cloud id del tenant
  *   ATLASSIAN_WORKSPACE_ID      workspace de Assets (default: el de Meridiano)
  *   CONFLUENCE_CREDS_PAGE_ID    página de ALYCs (default 143753217)
@@ -32,7 +38,9 @@ const kvClient = new SecretClient(VAULT_URL, new ManagedIdentityCredential());
 
 const CLOUD_ID = process.env.ATLASSIAN_CLOUD_ID || "4975c4c5-1b46-466c-a226-d36c8e0edc0d";
 const WORKSPACE_ID = process.env.ATLASSIAN_WORKSPACE_ID || "bd25a35d-a315-4a3b-b50f-f35892b6aea2";
-const TOKEN = process.env.ATLASSIAN_API_TOKEN || "";
+const TOKEN = process.env.ATLASSIAN_API_TOKEN || "";                    // Confluence (Bearer)
+const ASSETS_EMAIL = process.env.ATLASSIAN_EMAIL || "";                 // Assets (Basic)
+const ASSETS_TOKEN = process.env.ATLASSIAN_ASSETS_TOKEN || "";          // Assets (Basic)
 
 const ASSETS_BASE = `https://api.atlassian.com/jsm/assets/workspace/${WORKSPACE_ID}/v1`;
 const CONFLUENCE_BASE = `https://api.atlassian.com/ex/confluence/${CLOUD_ID}/rest/api`;
@@ -64,7 +72,8 @@ const TARGETS = {
 
 // ── Helpers HTTP ──────────────────────────────────────────────────────────────
 
-async function atlassianGet(url) {
+/** Confluence: Bearer vía api.atlassian.com (token "with scopes"). */
+async function confluenceGet(url) {
   const r = await fetch(url, {
     headers: { Authorization: `Bearer ${TOKEN}`, Accept: "application/json" },
   });
@@ -72,24 +81,45 @@ async function atlassianGet(url) {
   return await r.json();
 }
 
-async function assetsAql(qlQuery) {
-  // Trae los ids de los objetos del tipo pedido (paginado)
-  const out = [];
+/** Assets: Basic email:token + X-Atlassian-Token (sin ese header, AQL responde 403). */
+function assetsHeaders() {
+  const basic = Buffer.from(`${ASSETS_EMAIL}:${ASSETS_TOKEN}`).toString("base64");
+  return {
+    Authorization: `Basic ${basic}`,
+    Accept: "application/json",
+    "Content-Type": "application/json",
+    "X-Atlassian-Token": "no-check",
+  };
+}
+
+async function assetsGet(url) {
+  const r = await fetch(url, { headers: assetsHeaders() });
+  if (!r.ok) throw new Error(`GET assets ${url.replace(ASSETS_BASE, "")} → ${r.status}: ${(await r.text()).slice(0, 200)}`);
+  return await r.json();
+}
+
+/**
+ * Ids de los objetos de un tipo. NO se pide includeAttributes: en la respuesta de
+ * AQL los atributos vienen sin el nombre (solo el id), así que después se trae
+ * cada objeto con GET /object/{id}?includeAttributes=true, que sí lo incluye.
+ */
+async function assetsIdsDeTipo(objectTypeId) {
+  const ids = [];
   let startAt = 0;
   for (let guard = 0; guard < 40; guard++) {
-    const r = await fetch(`${ASSETS_BASE}/object/aql?startAt=${startAt}&maxResults=100&includeAttributes=true`, {
+    const r = await fetch(`${ASSETS_BASE}/object/aql?startAt=${startAt}&maxResults=100`, {
       method: "POST",
-      headers: { Authorization: `Bearer ${TOKEN}`, Accept: "application/json", "Content-Type": "application/json" },
-      body: JSON.stringify({ qlQuery }),
+      headers: assetsHeaders(),
+      body: JSON.stringify({ qlQuery: `objectTypeId = ${objectTypeId}` }),
     });
     if (!r.ok) throw new Error(`AQL → ${r.status}: ${(await r.text()).slice(0, 200)}`);
     const j = await r.json();
-    const values = j.values || j.objectEntries || [];
-    out.push(...values);
-    if (values.length < 100) break;
+    const values = j.values || [];
+    ids.push(...values.map((v) => v.id));
+    if (values.length < 100 || j.isLast === true) break;
     startAt += values.length;
   }
-  return out;
+  return ids;
 }
 
 // ── Helpers de atributos de Assets ────────────────────────────────────────────
@@ -149,7 +179,7 @@ function renderTabla(columna, filas, manuales) {
 }
 
 async function actualizarPagina(pageId, html) {
-  const actual = await atlassianGet(`${CONFLUENCE_BASE}/content/${pageId}?expand=version`);
+  const actual = await confluenceGet(`${CONFLUENCE_BASE}/content/${pageId}?expand=version`);
   const r = await fetch(`${CONFLUENCE_BASE}/content/${pageId}`, {
     method: "PUT",
     headers: { Authorization: `Bearer ${TOKEN}`, "Content-Type": "application/json", Accept: "application/json" },
@@ -169,45 +199,80 @@ async function actualizarPagina(pageId, html) {
 // ── Armado de filas para un target ────────────────────────────────────────────
 
 async function filasDe(target, ctx) {
-  const objetos = await assetsAql(`objectTypeId = ${target.objectTypeId}`);
+  const ids = await assetsIdsDeTipo(target.objectTypeId);
   const filas = [];
   const avisos = [];
 
-  for (const o of objetos) {
-    // Si el objeto no vino con atributos (según la variante de la API), lo pido
-    let obj = o;
-    if (!Array.isArray(obj.attributes) || obj.attributes.length === 0) {
-      obj = await atlassianGet(`${ASSETS_BASE}/object/${o.id}?includeAttributes=true`);
-    }
-
-    const entidad = refLabelDe(obj, target.refAttrs) || valorDe(obj, ["Name"]) || `objeto ${o.id}`;
+  // 1) Leer las cuentas (un objeto Assets = un juego de credenciales)
+  const cuentas = [];
+  for (const id of ids) {
+    const obj = await assetsGet(`${ASSETS_BASE}/object/${id}?includeAttributes=true`);
     const estado = valorDe(obj, ["Estado"]);
     if (estado && /inactiv|baja/i.test(estado)) continue;  // no listar cuentas dadas de baja
 
-    const usuario = valorDe(obj, ["Usuario"]);
-    const secretId = valorDe(obj, ["Secret ID"]);
+    cuentas.push({
+      id,
+      base: refLabelDe(obj, target.refAttrs) || valorDe(obj, ["Name"]) || `objeto ${id}`,
+      nombre: valorDe(obj, ["Name"]),
+      perfil: valorDe(obj, ["Tipo perfil"]),
+      usuario: valorDe(obj, ["Usuario"]),
+      secretId: valorDe(obj, ["Secret ID"]),
+      dniAssets: valorDe(obj, ["DNI Usuario"]),
+    });
+  }
 
-    if (usuario) filas.push({ entidad, campo: "Usuario", valor: usuario });
+  // 2) Desambiguar cuando una misma entidad tiene varias cuentas
+  //    (ej. ConoSur → MN / Pamat / Mancia): si no se distinguen, no se sabe qué
+  //    usuario va con qué clave. Se usa el "Tipo perfil", o el sufijo del Name
+  //    ("ConoSur - Mancia" → "Mancia"), o el usuario como último recurso.
+  const porBase = {};
+  for (const c of cuentas) porBase[c.base] = (porBase[c.base] || 0) + 1;
+  for (const c of cuentas) {
+    if (porBase[c.base] > 1) {
+      let suf = c.perfil
+        || (c.nombre.includes(" - ") ? c.nombre.split(" - ").slice(1).join(" - ") : "")
+        || c.usuario;
+      // "meridianonorte (MN)" → "MN": si el sufijo ya trae un paréntesis, ese es el alias
+      const m = /\(([^)]+)\)\s*$/.exec(suf);
+      if (m) suf = m[1].trim();
+      c.entidad = suf ? `${c.base} (${suf})` : `${c.base} [${c.id}]`;
+    } else {
+      c.entidad = c.base;
+    }
+  }
 
-    if (!secretId) {
-      avisos.push(`${entidad}: objeto Assets ${obj.id} sin 'Secret ID' — no puedo traer la clave`);
+  // 3) Armar las filas, trayendo los valores del vault
+  for (const c of cuentas) {
+    if (!c.secretId) {
+      if (c.usuario) filas.push({ entidad: c.entidad, campo: "Usuario", valor: c.usuario });
+      avisos.push(`${c.entidad}: objeto Assets ${c.id} sin 'Secret ID' — no puedo traer la clave`);
       continue;
     }
 
-    const pass = await leerSecret(secretId);
+    // Usuario: el vault manda ({X}-USUARIO) porque es lo que usan los scrapers;
+    // el atributo de Assets puede quedar viejo (ej. WIN quedó en 'meridiano'
+    // después de migrar a Fermi, cuando el usuario real pasó a ser un email).
+    const usuarioVault = /-PASSWORD$/i.test(c.secretId)
+      ? await leerSecret(c.secretId.replace(/-PASSWORD$/i, "-USUARIO"))
+      : null;
+    const usuario = usuarioVault || c.usuario;
+    if (usuario) filas.push({ entidad: c.entidad, campo: "Usuario", valor: usuario });
+    if (usuarioVault && c.usuario && usuarioVault !== c.usuario) {
+      avisos.push(`${c.entidad}: el 'Usuario' de Assets ('${c.usuario}') difiere del vault ('${usuarioVault}') — se publicó el del vault`);
+    }
+
+    const pass = await leerSecret(c.secretId);
     filas.push({
-      entidad,
+      entidad: c.entidad,
       campo: "Contraseña",
       valor: pass === null ? "(sin cargar en el vault)" : pass,
     });
 
-    // DNI/CUIT: solo se lista si existe el secret (portales con 3 identificadores)
-    if (/-PASSWORD$/i.test(secretId)) {
-      const dniSecret = secretId.replace(/-PASSWORD$/i, "-DOCUMENTO");
-      const dni = await leerSecret(dniSecret);
-      const dniAssets = valorDe(obj, ["DNI Usuario"]);
-      if (dni !== null || dniAssets) {
-        filas.push({ entidad, campo: "DNI / CUIT", valor: dni ?? dniAssets });
+    // DNI/CUIT: solo para los portales que lo piden (3 identificadores)
+    if (/-PASSWORD$/i.test(c.secretId)) {
+      const dni = await leerSecret(c.secretId.replace(/-PASSWORD$/i, "-DOCUMENTO"));
+      if (dni !== null || c.dniAssets) {
+        filas.push({ entidad: c.entidad, campo: "DNI / CUIT", valor: dni ?? c.dniAssets });
       }
     }
   }
@@ -218,8 +283,8 @@ async function filasDe(target, ctx) {
     a.entidad.localeCompare(b.entidad, "es") ||
     (ordenCampo[a.campo] ?? 9) - (ordenCampo[b.campo] ?? 9));
 
-  ctx.log(`[${target.objectTypeId}] ${objetos.length} objetos → ${filas.length} filas, ${avisos.length} avisos`);
-  return { filas, avisos, objetos: objetos.length };
+  ctx.log(`[${target.objectTypeId}] ${ids.length} objetos → ${filas.length} filas, ${avisos.length} avisos`);
+  return { filas, avisos, objetos: ids.length };
 }
 
 // ── Handler ───────────────────────────────────────────────────────────────────
