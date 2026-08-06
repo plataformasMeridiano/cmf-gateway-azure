@@ -1,6 +1,6 @@
 const { app } = require('@azure/functions');
 const {
-    DoorsSession, lqfBase, makeSupa,
+    DoorsSession, lqfBase, makeSupa, normalizarTipoOperacion, pan0Prog,
     login, lookupFirmante, crearLiquidacion, descargarYSubirPdf, actualizarTasa,
 } = require('../doors-helpers');
 
@@ -23,8 +23,13 @@ app.http('cesion-execute', {
         const { jira_cesion_key } = body;
         const montoAprobadoRaw    = (body.monto_aprobado      != null && body.monto_aprobado      !== '') ? body.monto_aprobado      : null;
         const porcentajeOverride  = (body.porcentaje_anticipo != null && body.porcentaje_anticipo !== '') ? parseFloat(body.porcentaje_anticipo) : null;
+        // Custom field de la cesión en Jira: "Cesión Puntual" o "Factoring" (si no viene: cesión)
+        const tipoOperacion       = normalizarTipoOperacion(body.tipo_operacion);
         if (!jira_cesion_key) {
             return { status: 400, jsonBody: { ok: false, error: 'jira_cesion_key es requerido' } };
+        }
+        if (!tipoOperacion) {
+            return { status: 400, jsonBody: { ok: false, error: `tipo_operacion inválido: ${body.tipo_operacion}. Valores válidos: "Cesión Puntual" o "Factoring"` } };
         }
 
         if (isMock) {
@@ -121,7 +126,7 @@ app.http('cesion-execute', {
 
         try {
             await login(s);
-            context.log('Login Doors OK');
+            context.log('Login Doors OK | tipo_operacion:', tipoOperacion, '→', pan0Prog(tipoOperacion));
 
             const razonSocial = rows[0].razon_social
                 || await lookupFirmante(s, rows[0].sociedad, rows[0].cuit_deudor);
@@ -141,6 +146,7 @@ app.http('cesion-execute', {
                 try {
                     const rowParaDoors = {
                         ...factura,
+                        tipo_operacion:           tipoOperacion,
                         razon_social:             razonSocial,
                         fecha_operacion_ddmmyyyy: factura.fecha_operacion_ddmmyyyy || isoToDdMmYyyy(factura.fecha_operacion),
                         fecha_dep_ddmmyyyy:       factura.fecha_dep_ddmmyyyy       || isoToDdMmYyyy(factura.fecha_dep),
@@ -176,7 +182,7 @@ app.http('cesion-execute', {
                     context.error(`Error procesando ${factura.jira_factura_key}:`, facturaError.message);
 
                     if (recId) {
-                        try { await s.get(`${lqf}/fac-pan0.php?id=${recId}&atras=1`); } catch {}
+                        try { await s.get(`${lqf}/${pan0Prog(tipoOperacion)}?id=${recId}&atras=1`); } catch {}
                     }
 
                     await supa.from('doors_liquidaciones_facturas').update({

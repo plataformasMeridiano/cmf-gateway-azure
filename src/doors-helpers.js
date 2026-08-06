@@ -109,6 +109,33 @@ function makeSupa() {
     );
 }
 
+// Valores del custom field "tipo de operación" de la cesión en Jira → tipo interno
+const TIPOS_OPERACION = {
+    'cesion puntual': 'cesion',
+    'factoring':      'factoraje',
+};
+
+// Normaliza el custom field de Jira a 'cesion' | 'factoraje'.
+// Ausente o vacío → 'cesion' (retrocompatible: Zapier todavía no manda el campo).
+// Valor no reconocido → null, para que el caller lo rechace en vez de asumir un tipo
+// y cargar la liquidación por el menú equivocado sin que nadie se entere.
+function normalizarTipoOperacion(valor) {
+    if (valor == null || String(valor).trim() === '') return 'cesion';
+    let v = String(valor).toLowerCase()
+        .normalize('NFD').replace(/[\u0300-\u036f]/g, '');   // sacar acentos
+    v = v.replace(/\s+/g, ' ').trim();
+    return TIPOS_OPERACION[v] || null;
+}
+
+// Programa de entrada en Doors según el tipo de operación:
+//   cesion    → fac-pan0.php  (menú "Alta de Liquidación (Facturas)", id1250)
+//   factoraje → fac-pan0f.php (menú "Alta de Liquidación (Facturas Factoraje)", id1333)
+// Las pantallas siguientes (pan2/pan3/pan4/pdf) son las mismas para ambos: el tipo queda
+// grabado en el registro según cuál de los dos pan0 lo creó, no por un campo del formulario.
+function pan0Prog(tipoOperacion) {
+    return tipoOperacion === 'factoraje' ? 'fac-pan0f.php' : 'fac-pan0.php';
+}
+
 // Extrae el texto visible de una pantalla Doors y lo adjunta al error
 function doorsError(step, body, url) {
     const text = body
@@ -166,7 +193,8 @@ async function getMaxCesion(s, clienteCodigo) {
 }
 
 async function crearLiquidacion(s, lqf, row) {
-    const r0  = await s.post(`${lqf}/fac-pan0.php`, { CONF: '1' });
+    const esFactoraje = row.tipo_operacion === 'factoraje';
+    const r0  = await s.post(`${lqf}/${pan0Prog(row.tipo_operacion)}`, { CONF: '1' });
     const m0  = r0.url.match(/[?&]id=(\d+)/);
     if (!m0) throw new Error(`No se obtuvo ID en pan0. URL: ${r0.url}`);
     const recId = m0[1];
@@ -183,7 +211,8 @@ async function crearLiquidacion(s, lqf, row) {
         MONTO:      String(row.monto_anticipo || 0),
         GARANTIA:   String(row.monto_garantia || 0),
         OBS:        row.observaciones    || '',
-        TIPO_RG:    row.tipo_ganancias   || '6',
+        // Factoraje no lleva retención de ganancias: pan0f fija TIPO_RG=0 (campo oculto)
+        TIPO_RG:    esFactoraje ? '0' : (row.tipo_ganancias || '6'),
         MONEDA_FAC: '1',
     });
     // pan2 OK: debe mostrar el formulario de ítem (campo ABMITEM presente)
@@ -282,6 +311,7 @@ async function actualizarTasa(s, clienteCodigo, cesionNumero, tasa) {
 
 module.exports = {
     DoorsSession, lqfBase, parseDate, toDdMmYyyy, makeSupa,
+    normalizarTipoOperacion, pan0Prog,
     login, lookupFirmante, getMaxCesion,
     crearLiquidacion, descargarYSubirPdf, actualizarTasa,
     DOORS_USER,
