@@ -64,7 +64,21 @@ app.http("update-secret", {
     try {
       await kvClient.setSecret(secretName, secretValue);
       context.log(`Secret '${secretName}' actualizado OK`);
-      return { status: 200, jsonBody: { ok: true, secret: secretName } };
+
+      // Republicar la página de Confluence que corresponda (ALYCs o Bancos).
+      // Best-effort: si falla, la rotación ya está hecha y no se reporta error;
+      // el detalle vuelve en `page_refresh` para poder diagnosticarlo.
+      let pageRefresh;
+      try {
+        const { refreshTarget, targetDeSecret } = require("./refresh-creds-page");
+        const target = targetDeSecret(secretName);
+        pageRefresh = { target, ...(await refreshTarget(target, { ctx: context })) };
+      } catch (e) {
+        context.error(`No se pudo republicar la página de Confluence: ${e.message}`);
+        pageRefresh = { ok: false, error: e.message };
+      }
+
+      return { status: 200, jsonBody: { ok: true, secret: secretName, page_refresh: pageRefresh } };
     } catch (err) {
       context.error(`Error actualizando '${secretName}':`, err);
       return { status: 500, jsonBody: { error: err.message } };

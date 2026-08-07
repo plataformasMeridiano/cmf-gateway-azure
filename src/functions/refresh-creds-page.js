@@ -335,45 +335,60 @@ async function filasDe(target, ctx) {
   return { filas, avisos, objetos: ids.length };
 }
 
+// ── API reusable (la usa el handler y también update-secret) ──────────────────
+
+/**
+ * Regenera la página de un target ("alycs" | "bancos").
+ * No lanza: devuelve { ok:false, error } para que el caller decida qué hacer.
+ */
+async function refreshTarget(nombre, { dryRun = false, ctx = console } = {}) {
+  const target = TARGETS[nombre];
+  if (!target) return { ok: false, error: `target inválido: ${nombre}` };
+  if (!TOKEN) return { ok: false, error: "Falta ATLASSIAN_API_TOKEN en el Function App" };
+
+  try {
+    const { filas, avisos, objetos } = await filasDe(target, ctx);
+    const html = renderTabla(target.columna, filas, target.manuales);
+    return {
+      ok: true, objetos, filas: filas.length, avisos,
+      ...(dryRun
+        ? { dryRun: true, preview: filas, html_len: html.length }
+        : { pagina: await actualizarPagina(target.pageId, html) }),
+    };
+  } catch (err) {
+    (ctx.error || ctx.log || console.error)(`[refresh ${nombre}] ${err.message}`);
+    return { ok: false, error: err.message };
+  }
+}
+
+/** A qué página corresponde un secret: los BANCO-* van a la de bancos. */
+function targetDeSecret(secretName) {
+  return String(secretName || "").toUpperCase().startsWith("BANCO-") ? "bancos" : "alycs";
+}
+
 // ── Handler ───────────────────────────────────────────────────────────────────
 
 app.http("refresh-creds-page", {
   methods: ["POST"],
   authLevel: "function",
   handler: async (request, context) => {
-    if (!TOKEN) {
-      return { status: 500, jsonBody: { error: "Falta ATLASSIAN_API_TOKEN en el Function App" } };
-    }
-
     const q = new URL(request.url).searchParams;
     const dryRun = q.get("dryRun") === "true";
     const pedido = (q.get("target") || "").toLowerCase();
-    const targets = pedido
-      ? (TARGETS[pedido] ? { [pedido]: TARGETS[pedido] } : null)
-      : TARGETS;
 
-    if (!targets) {
+    if (pedido && !TARGETS[pedido]) {
       return { status: 400, jsonBody: { error: `target inválido: use ${Object.keys(TARGETS).join(" | ")}` } };
     }
+    const nombres = pedido ? [pedido] : Object.keys(TARGETS);
 
     const resultado = {};
-    for (const [nombre, target] of Object.entries(targets)) {
-      try {
-        const { filas, avisos, objetos } = await filasDe(target, context);
-        const html = renderTabla(target.columna, filas, target.manuales);
-        resultado[nombre] = {
-          ok: true, objetos, filas: filas.length, avisos,
-          ...(dryRun
-            ? { dryRun: true, preview: filas, html_len: html.length }
-            : { pagina: await actualizarPagina(target.pageId, html) }),
-        };
-      } catch (err) {
-        context.error(`[${nombre}] ${err.message}`);
-        resultado[nombre] = { ok: false, error: err.message };
-      }
+    for (const nombre of nombres) {
+      resultado[nombre] = await refreshTarget(nombre, { dryRun, ctx: context });
     }
 
     const ok = Object.values(resultado).every((r) => r.ok);
     return { status: ok ? 200 : 502, jsonBody: { ok, dryRun, ...resultado } };
   },
 });
+
+module.exports = { refreshTarget, targetDeSecret, TARGETS };
