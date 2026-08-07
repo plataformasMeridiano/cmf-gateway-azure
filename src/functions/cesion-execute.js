@@ -4,6 +4,13 @@ const {
     login, lookupFirmante, crearLiquidacion, descargarYSubirPdf, actualizarTasa,
 } = require('../doors-helpers');
 
+// TTL del lock de la operación. Cubre un execute completo; si vence con el run todavía
+// vivo, el claim por factura (capa 2) sigue impidiendo el doble procesamiento.
+const LOCK_TTL_SECONDS  = 900;   // 15 min
+// TTL del claim por factura. Muy por encima de lo que tarda una sola (segundos),
+// así un claim solo se recupera cuando el run que lo tomó realmente murió.
+const CLAIM_TTL_SECONDS = 600;   // 10 min
+
 app.http('cesion-execute', {
     methods:   ['POST'],
     route:     'cesion/execute',
@@ -121,6 +128,25 @@ app.http('cesion-execute', {
         const cesionBase = rows[0].cesion_actual || 0;
 
         const lqf = lqfBase(facturas[0].sociedad);
+
+        // Capa 1 — lock por cesión: impide que dos execute concurrentes trabajen la misma
+        // operación. Si el dueño anterior murió, el TTL deja que este run lo tome.
+        // Se toma acá, después de todas las validaciones: nada entre este punto y el try
+        // puede fallar, así que el lock nunca queda tomado por un camino que no lo libera.
+        const lockOwner = context.invocationId || `exec-${jira_cesion_key}`;
+        const { data: gotLock, error: le } = await supa.rpc('cesion_try_lock', {
+            p_key: jira_cesion_key, p_owner: lockOwner, p_ttl_seconds: LOCK_TTL_SECONDS,
+        });
+        if (le) {
+            context.error('Error al pedir el lock:', le.message);
+            return { status: 500, jsonBody: { ok: false, error: `No se pudo tomar el lock: ${le.message}` } };
+        }
+        if (!gotLock) {
+            context.log(`Lock ocupado para ${jira_cesion_key} — hay otro execute en curso`);
+            return { status: 409, jsonBody: { ok: false, error: `Ya hay un execute en curso para la cesión ${jira_cesion_key}. Esperá a que termine antes de reintentar.` } };
+        }
+        context.log(`Lock tomado para ${jira_cesion_key} (owner: ${lockOwner})`);
+
         const s   = new DoorsSession();
         const resultados = [];
 
@@ -139,6 +165,32 @@ app.http('cesion-execute', {
                 if (factura.status === 'ok') {
                     context.log(`Factura ${factura.jira_factura_key} ya procesada, saltando`);
                     resultados.push({ ok: true, jira_factura_key: factura.jira_factura_key, doors_liq_numero: factura.doors_liq_numero, cesion_numero: factura.cesion_numero, pdf_filename: factura.pdf_filename, monto_anticipo: factura.monto_anticipo, skipped: true, error_msg: null });
+                    continue;
+                }
+
+                // Capa 2 — claim atómico: gana una sola corrida. Cierra la ventana entre
+                // "Doors creó la liquidación" y "Supabase dice ok", que es lo que produjo
+                // liquidaciones duplicadas cuando dos execute corrieron en paralelo.
+                const { data: claimed, error: ce } = await supa.rpc('cesion_claim_factura', {
+                    p_id: factura.id, p_stale_seconds: CLAIM_TTL_SECONDS,
+                });
+                if (ce) {
+                    context.error(`Error al reclamar ${factura.jira_factura_key}:`, ce.message);
+                    resultados.push({ ok: false, jira_factura_key: factura.jira_factura_key, doors_liq_numero: null, cesion_numero: null, pdf_filename: null, monto_anticipo: factura.monto_anticipo, skipped: false, error_msg: `No se pudo reclamar la factura: ${ce.message}` });
+                    continue;
+                }
+                if (!claimed) {
+                    // Otra corrida la tiene o ya la terminó. `rows` es un snapshot previo al lock,
+                    // así que releemos para devolver el número de liquidación real y no un null
+                    // que dejaría el ticket de Jira sin transicionar.
+                    const { data: actual } = await supa
+                        .from('doors_liquidaciones_facturas')
+                        .select('status, doors_liq_numero, cesion_numero, pdf_filename, monto_anticipo, error_msg')
+                        .eq('id', factura.id)
+                        .single();
+                    const f = actual || factura;
+                    context.log(`Factura ${factura.jira_factura_key} tomada por otra corrida (status: ${f.status}), saltando`);
+                    resultados.push({ ok: f.status === 'ok', jira_factura_key: factura.jira_factura_key, doors_liq_numero: f.doors_liq_numero ?? null, cesion_numero: f.cesion_numero ?? null, pdf_filename: f.pdf_filename ?? null, monto_anticipo: f.monto_anticipo ?? factura.monto_anticipo, skipped: true, error_msg: f.status === 'ok' ? null : (f.error_msg || 'La factura está siendo procesada por otra corrida') });
                     continue;
                 }
 
@@ -174,6 +226,7 @@ app.http('cesion-execute', {
                         monto_anticipo:   factura.monto_anticipo,
                         status:           'ok',
                         error_msg:        null,
+                        processing_since: null,
                     }).eq('id', factura.id);
 
                     resultados.push({ ok: true, jira_factura_key: factura.jira_factura_key, doors_liq_numero: liqNum, cesion_numero: cesionNumero, pdf_filename: pdfPath, monto_anticipo: factura.monto_anticipo, skipped: false, error_msg: null });
@@ -186,8 +239,9 @@ app.http('cesion-execute', {
                     }
 
                     await supa.from('doors_liquidaciones_facturas').update({
-                        status:    'error',
-                        error_msg: facturaError.message,
+                        status:           'error',
+                        error_msg:        facturaError.message,
+                        processing_since: null,
                     }).eq('id', factura.id);
 
                     resultados.push({ ok: false, jira_factura_key: factura.jira_factura_key, doors_liq_numero: null, cesion_numero: null, pdf_filename: null, monto_anticipo: factura.monto_anticipo, skipped: false, error_msg: facturaError.message });
@@ -211,6 +265,21 @@ app.http('cesion-execute', {
         } catch (error) {
             context.error('Error en execute:', error.message);
             return { status: 500, jsonBody: { ok: false, error: error.message } };
+
+        } finally {
+            // Liberar el lock pase lo que pase. `cesion_unlock` solo borra si seguimos siendo
+            // dueños: si el TTL venció y otro run lo tomó, no se lo pisamos.
+            try {
+                const { data: released } = await supa.rpc('cesion_unlock', {
+                    p_key: jira_cesion_key, p_owner: lockOwner,
+                });
+                context.log(released
+                    ? `Lock liberado para ${jira_cesion_key}`
+                    : `Lock de ${jira_cesion_key} ya no era nuestro (venció el TTL y lo tomó otro run)`);
+            } catch (ue) {
+                // El lock vence solo por TTL, así que no dejamos la cesión trabada.
+                context.error('No se pudo liberar el lock:', ue.message);
+            }
         }
     },
 });
