@@ -9,6 +9,8 @@ const { ManagedIdentityCredential } = require("@azure/identity");
  *   Assets (quién es quién)      →  objeto "Usuarios Alycs" (119) / "Usuarios Banco" (253)
  *                                   atributos: Usuario, DNI Usuario, Secret ID, Estado,
  *                                   y la referencia al padre (ALyC / Cuenta) para agrupar
+ *   Assets (la URL de login)     →  del objeto padre: "URL base" de "Alycs" (118) o
+ *                                   "URL" de "Cuentas Meridiano" (13). URLS_ALYC es fallback.
  *   Key Vault (los valores)      →  {Secret ID} = contraseña, {Secret ID}-DOCUMENTO = DNI/CUIT
  *   Confluence (el resultado)    →  una página por entidad (ALYCs / Bancos)
  *
@@ -45,10 +47,13 @@ const ASSETS_TOKEN = process.env.ATLASSIAN_ASSETS_TOKEN || "";          // Asset
 const ASSETS_BASE = `https://api.atlassian.com/jsm/assets/workspace/${WORKSPACE_ID}/v1`;
 const CONFLUENCE_BASE = `https://api.atlassian.com/ex/confluence/${CLOUD_ID}/rest/api`;
 
-// URL de login por ALYC. No está en Assets (el objeto "Alycs" solo tiene Nombre y
-// Estado), así que se mantiene acá, alineado con el url_login de
-// DescargaBoletos/config.json, que es lo que realmente usan los scrapers.
-// Para los bancos NO hace falta: la URL sale del atributo del objeto "Cuentas Meridiano".
+// FALLBACK de la URL de login por ALYC.
+//
+// La URL sale del objeto padre en Assets: el atributo "URL base" de "Alycs" (118)
+// y el "URL" de "Cuentas Meridiano" (13). Este mapa quedó como red de seguridad
+// para las ALYCs que todavía no tengan el atributo cargado, y está alineado con el
+// url_login de DescargaBoletos/config.json, que es lo que usan los scrapers.
+// Si cargás la URL en Assets, esta entrada deja de usarse.
 const URLS_ALYC = {
   "ADCAP": "https://micuenta2.ad-cap.com.ar/ehomedmz/vbhome/login.html#!/login",
   "Allaria": "https://allaria-ssl.allaria.com.ar/AllariaOnline/VBolsaNet/login.html#!/login",
@@ -72,7 +77,7 @@ const TARGETS = {
     columna: "ALyC",
     // atributo de referencia al "dueño" del usuario, para agrupar las filas
     refAttrs: ["ALyC", "Alyc"],
-    urls: URLS_ALYC,          // la URL viene de este mapa
+    urls: URLS_ALYC,          // fallback si el objeto "Alycs" no tiene "URL base"
     // Filas que no salen de Assets y hay que preservar (gestión manual)
     manuales: [
       ["Petrini", "Usuario"], ["Petrini", "Contraseña"],
@@ -86,7 +91,6 @@ const TARGETS = {
     pageId: process.env.CONFLUENCE_BANCOS_PAGE_ID || "157908993",
     columna: "Banco",
     refAttrs: ["Cuenta"],
-    urlDesdeRef: true,        // la URL sale del objeto "Cuentas Meridiano" referenciado
     manuales: [],
   },
 };
@@ -171,6 +175,24 @@ function refIdDe(obj, nombres) {
   return id ? String(id) : "";
 }
 
+/**
+ * URL de login de una cuenta. Sale del objeto padre en Assets — "URL base" de
+ * "Alycs" (118) o "URL" de "Cuentas Meridiano" (13) — y sólo si ahí no hay nada
+ * cae al mapa del código. Cachea por refId para no pedir el mismo padre N veces.
+ */
+async function urlDeCuenta(c, target, urlCache) {
+  if (c.refId) {
+    if (!(c.refId in urlCache)) {
+      try {
+        const ref = await assetsGet(`${ASSETS_BASE}/object/${c.refId}?includeAttributes=true`);
+        urlCache[c.refId] = valorDe(ref, ["URL base", "URL", "Url", "Página", "Pagina"]);
+      } catch { urlCache[c.refId] = ""; }
+    }
+    if (urlCache[c.refId]) return urlCache[c.refId];
+  }
+  return target.urls ? (target.urls[c.base] || "") : "";
+}
+
 // ── Key Vault ─────────────────────────────────────────────────────────────────
 
 async function leerSecret(nombre) {
@@ -193,9 +215,14 @@ function renderTabla(columna, filas, manuales) {
   const th = `<tr><th><p><strong>${esc(columna)}</strong></p></th><th><p><strong>Campo</strong></p></th>`
     + `<th><p><strong>Valor</strong></p></th><th><p><strong>Gestión</strong></p></th></tr>`;
 
+  // Las URLs van como link: es una página de accesos y se usa para entrar al portal.
+  const celdaValor = (valor) => (/^https?:\/\//i.test(String(valor).trim())
+    ? `<a href="${esc(valor)}">${esc(valor)}</a>`
+    : esc(valor));
+
   const tr = (entidad, campo, valor, gestion) =>
     `<tr><td><p>${esc(entidad)}</p></td><td><p>${esc(campo)}</p></td>`
-    + `<td><p>${esc(valor)}</p></td><td><p>${esc(gestion)}</p></td></tr>`;
+    + `<td><p>${celdaValor(valor)}</p></td><td><p>${esc(gestion)}</p></td></tr>`;
 
   const cuerpo = filas.map((f) => tr(f.entidad, f.campo, f.valor, "Auto")).join("");
   const manual = manuales.map(([e, c]) => tr(e, c, "(gestión manual)", "Manual")).join("");
@@ -271,25 +298,14 @@ async function filasDe(target, ctx) {
   }
 
   // 3) Armar las filas, trayendo los valores del vault
-  const urlCache = {};   // refId → URL (para no pedir el mismo banco N veces)
-  const conPagina = new Set();
+  const urlCache = {};   // refId → URL (para no pedir el mismo padre N veces)
 
   for (const c of cuentas) {
-    // Fila "Página": una sola por entidad base (no por cada cuenta)
-    if (!conPagina.has(c.base)) {
-      let url = target.urls ? (target.urls[c.base] || "") : "";
-      if (!url && target.urlDesdeRef && c.refId) {
-        if (!(c.refId in urlCache)) {
-          try {
-            const ref = await assetsGet(`${ASSETS_BASE}/object/${c.refId}?includeAttributes=true`);
-            urlCache[c.refId] = valorDe(ref, ["URL", "Url", "Página", "Pagina"]);
-          } catch { urlCache[c.refId] = ""; }
-        }
-        url = urlCache[c.refId];
-      }
-      if (url) filas.push({ entidad: c.base, campo: "Página", valor: url });
-      conPagina.add(c.base);
-    }
+    // Fila "Página": va en CADA entidad, no una sola por entidad base. Cuando una
+    // entidad tiene varias cuentas (ConoSur, BST), publicarla una sola vez dejaba
+    // una fila suelta sin usuario ni clave y los usuarios sin su URL.
+    const url = await urlDeCuenta(c, target, urlCache);
+    if (url) filas.push({ entidad: c.entidad, campo: "Página", valor: url });
 
     if (!c.secretId) {
       if (c.usuario) filas.push({ entidad: c.entidad, campo: "Usuario", valor: c.usuario });
