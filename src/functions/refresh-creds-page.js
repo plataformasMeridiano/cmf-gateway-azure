@@ -78,12 +78,12 @@ const TARGETS = {
     // atributo de referencia al "dueño" del usuario, para agrupar las filas
     refAttrs: ["ALyC", "Alyc"],
     urls: URLS_ALYC,          // fallback si el objeto "Alycs" no tiene "URL base"
-    // Filas que no salen de Assets y hay que preservar (gestión manual)
+    // Filas que no salen de Assets y hay que preservar (gestión manual).
+    // Pharos, Stonex y Valo salieron de acá el 2026-08-11: ya tienen su objeto en
+    // "Usuarios Alycs" y su clave en el vault. Petrini sigue manual porque no
+    // aparece ni en el Excel de claves ni en Assets — hay que ver si sigue vigente.
     manuales: [
       ["Petrini", "Usuario"], ["Petrini", "Contraseña"],
-      ["Pharos", "Usuario"], ["Pharos", "Contraseña"],
-      ["Stonex", "Usuario"], ["Stonex", "Contraseña"],
-      ["Valo", "Usuario"], ["Valo", "Contraseña"],
     ],
   },
   bancos: {
