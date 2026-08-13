@@ -124,9 +124,6 @@ app.http('cesion-execute', {
             }
         }
 
-        // cesion_actual: el probe guarda el mismo valor para todos los docs de la operación
-        const cesionBase = rows[0].cesion_actual || 0;
-
         const lqf = lqfBase(facturas[0].sociedad);
 
         // Capa 1 — lock por cesión: impide que dos execute concurrentes trabajen la misma
@@ -157,10 +154,8 @@ app.http('cesion-execute', {
             const razonSocial = rows[0].razon_social
                 || await lookupFirmante(s, rows[0].sociedad, rows[0].cuit_deudor);
 
-            // Procesar cada FC en orden (el índice determina el cesion_numero)
             for (let i = 0; i < facturasConMontos.length; i++) {
-                const factura      = facturasConMontos[i];
-                const cesionNumero = cesionBase + 1 + i;
+                const factura = facturasConMontos[i];
 
                 if (factura.status === 'ok') {
                     context.log(`Factura ${factura.jira_factura_key} ya procesada, saltando`);
@@ -210,11 +205,22 @@ app.http('cesion-execute', {
                     const { liqNum } = result;
                     context.log(`Liquidación creada para ${factura.jira_factura_key}:`, liqNum);
 
-                    const pdfPath = await descargarYSubirPdf(s, lqf, liqNum, factura.sociedad, supa);
-                    context.log('PDF subido:', pdfPath);
+                    // El nº de cesión lo asigna Doors y sale del PDF, que ya bajamos acá.
+                    // Es dato exacto: no hay que calcularlo ni sondearlo.
+                    const { path: pdfPath, cesionNumero } = await descargarYSubirPdf(s, lqf, liqNum, factura.sociedad, supa);
+                    context.log('PDF subido:', pdfPath, '| cesion:', cesionNumero);
 
-                    await actualizarTasa(s, factura.cliente_codigo, cesionNumero, factura.tasa_anual);
-                    context.log(`Tasa actualizada → cesion ${cesionNumero}`);
+                    // Sin número no se toca la tasa: escribirla en una cuenta adivinada es
+                    // justamente el bug que trajo esto. La liquidación quedó bien igual,
+                    // así que se marca ok y se avisa para corregir la tasa a mano.
+                    let avisoTasa = null;
+                    if (cesionNumero == null) {
+                        avisoTasa = `No se pudo leer el nº de cesión del PDF de la liquidación ${liqNum}: la tasa NO se actualizó en Doors`;
+                        context.error(avisoTasa);
+                    } else {
+                        await actualizarTasa(s, factura.cliente_codigo, cesionNumero, factura.tasa_anual);
+                        context.log(`Tasa actualizada → cesion ${cesionNumero}`);
+                    }
 
                     await supa.from('doors_liquidaciones_facturas').update({
                         doors_rec_id:     recId,
@@ -225,11 +231,11 @@ app.http('cesion-execute', {
                         importe_efectivo: factura.importe_efectivo,
                         monto_anticipo:   factura.monto_anticipo,
                         status:           'ok',
-                        error_msg:        null,
+                        error_msg:        avisoTasa,
                         processing_since: null,
                     }).eq('id', factura.id);
 
-                    resultados.push({ ok: true, jira_factura_key: factura.jira_factura_key, doors_liq_numero: liqNum, cesion_numero: cesionNumero, pdf_filename: pdfPath, monto_anticipo: factura.monto_anticipo, skipped: false, error_msg: null });
+                    resultados.push({ ok: true, jira_factura_key: factura.jira_factura_key, doors_liq_numero: liqNum, cesion_numero: cesionNumero, pdf_filename: pdfPath, monto_anticipo: factura.monto_anticipo, skipped: false, error_msg: avisoTasa });
 
                 } catch (facturaError) {
                     context.error(`Error procesando ${factura.jira_factura_key}:`, facturaError.message);

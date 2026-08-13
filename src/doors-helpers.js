@@ -2,6 +2,7 @@
 const http        = require('http');
 const https       = require('https');
 const querystring = require('querystring');
+const zlib        = require('zlib');
 
 const SERVER         = 'http://mancia3.login-erp.com:82';
 const MNPC           = `${SERVER}/mnpc`;
@@ -169,27 +170,42 @@ async function lookupFirmante(s, sociedad, cuit) {
     return data.DES;
 }
 
-async function getMaxCesion(s, clienteCodigo) {
-    const cc  = `${MNPC}/finan_cc`;
-    const pad = clienteCodigo.padStart(5, '0');
+// Texto plano de un PDF de Doors. Los genera FPDF, así que el texto vive en los content
+// streams como operadores Tj/TJ, en claro o comprimidos con Flate (zlib es built-in).
+function textoDePdf(buf) {
+    const crudo  = buf.toString('latin1');
+    const trozos = [];
 
-    const existe = async (n) => {
-        const id = `1.04.${pad}.${String(n).padStart(3, '0')}`;
-        const r  = await s.post(`${cc}/adicxcta-abm.php`, {
-            ID: id, ABM: 'M', PAGINA: `${MNPC}/finan_cc/adicxcta-ini.php?`,
-        });
-        return r.body.includes('TASA_ACT_CIE');
-    };
-
-    // Hallar el bloque de 50 que contiene el máximo: escalar de a 50 hasta no encontrar
-    let techo = 50;
-    while (techo <= 500 && await existe(techo)) techo += 50;
-
-    // Escanear hacia abajo dentro del bloque [techo-50 .. techo-1]
-    for (let n = techo - 1; n >= Math.max(1, techo - 50); n--) {
-        if (await existe(n)) return n;
+    const reStream = /stream\r?\n([\s\S]*?)\r?\nendstream/g;
+    let ms;
+    while ((ms = reStream.exec(crudo)) !== null) {
+        let datos = Buffer.from(ms[1], 'latin1');
+        try { datos = zlib.inflateSync(datos); } catch { /* no está comprimido */ }
+        trozos.push(datos.toString('latin1'));
     }
-    return 0;
+    const contenido = trozos.length ? trozos.join('\n') : crudo;
+
+    const salida = [];
+    let m;
+    const reTj = /\(((?:\\.|[^\\()])*)\)\s*Tj/g;
+    while ((m = reTj.exec(contenido)) !== null) salida.push(m[1]);
+    const reTJ = /\[((?:\\.|[^\\[\]])*)\]\s*TJ/g;
+    while ((m = reTJ.exec(contenido)) !== null) {
+        salida.push([...m[1].matchAll(/\(((?:\\.|[^\\()])*)\)/g)].map(x => x[1]).join(''));
+    }
+
+    return salida
+        .map(t => t.replace(/\\([()\\])/g, '$1')
+                   .replace(/\\(\d{3})/g, (_, o) => String.fromCharCode(parseInt(o, 8))))
+        .join('\n');
+}
+
+// Número de cesión que Doors le asignó a la liquidación. Sale del propio PDF
+// ("Nro 48378   Cesion 31") y es la única fuente exacta: Doors lo calcula solo
+// (máximo + 1 por cliente) y no lo expone por ninguna otra vía.
+function extraerCesionDePdf(buf) {
+    const m = textoDePdf(buf).match(/Cesion\s*[:\s]\s*(\d+)/i);
+    return m ? parseInt(m[1], 10) : null;
 }
 
 async function crearLiquidacion(s, lqf, row) {
@@ -280,7 +296,7 @@ async function descargarYSubirPdf(s, lqf, liqNum, sociedad, supa) {
         contentType: 'application/pdf',
     });
     if (error) throw new Error(`Storage upload: ${error.message}`);
-    return path;
+    return { path, cesionNumero: extraerCesionDePdf(r.body) };
 }
 
 async function actualizarTasa(s, clienteCodigo, cesionNumero, tasa) {
@@ -312,7 +328,7 @@ async function actualizarTasa(s, clienteCodigo, cesionNumero, tasa) {
 module.exports = {
     DoorsSession, lqfBase, parseDate, toDdMmYyyy, makeSupa,
     normalizarTipoOperacion, pan0Prog,
-    login, lookupFirmante, getMaxCesion,
+    login, lookupFirmante, extraerCesionDePdf,
     crearLiquidacion, descargarYSubirPdf, actualizarTasa,
     DOORS_USER,
 };

@@ -1,5 +1,8 @@
 const { app }       = require('@azure/functions');
-const { DoorsSession, makeSupa, login, getMaxCesion } = require('../doors-helpers');
+// El probe ya no calcula el número de cesión: lo asigna Doors al crear la liquidación y
+// execute lo lee del PDF. Queda como chequeo previo de que Doors responde y las
+// credenciales sirven, antes de que la operación se dé por lista para ejecutar.
+const { DoorsSession, makeSupa, login } = require('../doors-helpers');
 
 app.storageQueue('cesion-probe', {
     queueName:  'cesion-probe',
@@ -25,44 +28,19 @@ app.storageQueue('cesion-probe', {
         }
         const row = rows[0];
 
-        // Si la cesión tiene jira_cesion_key, reusar cesion_actual ya calculado por un hermano
-        // (evita abrir N sesiones a Doors en paralelo para el mismo cliente)
-        if (row.jira_cesion_key) {
-            const { data: hermanos } = await supa
-                .from('doors_liquidaciones_facturas')
-                .select('cesion_actual')
-                .eq('jira_cesion_key', row.jira_cesion_key)
-                .not('cesion_actual', 'is', null)
-                .limit(1);
-
-            if (hermanos?.length) {
-                const cesionActual = hermanos[0].cesion_actual;
-                context.log(`Reutilizando cesion_actual=${cesionActual} de hermano para ${jira_factura_key}`);
-                await supa
-                    .from('doors_liquidaciones_facturas')
-                    .update({ cesion_actual: cesionActual, status: 'ready' })
-                    .eq('id', row.id);
-                return;
-            }
-        }
-
-        // Primero en llegar (o sin jira_cesion_key): abre Doors y calcula
         const s = new DoorsSession();
 
         try {
             await login(s);
-            context.log('Login OK');
-
-            const cesionActual = await getMaxCesion(s, row.cliente_codigo);
-            context.log('cesion_actual:', cesionActual, 'para cliente:', row.cliente_codigo);
+            context.log('Login OK — Doors responde');
 
             const { error: ue } = await supa
                 .from('doors_liquidaciones_facturas')
-                .update({ cesion_actual: cesionActual, status: 'ready' })
+                .update({ status: 'ready' })
                 .eq('id', row.id);
 
             if (ue) throw new Error(`Supabase update (ready): ${ue.message}`);
-            context.log('Probe completado:', jira_factura_key, '→ cesion_actual =', cesionActual);
+            context.log('Probe completado:', jira_factura_key);
 
         } catch (error) {
             context.error('Error en probe:', error.message);
