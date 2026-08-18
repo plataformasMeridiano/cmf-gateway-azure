@@ -124,6 +124,22 @@ app.http('cesion-execute', {
             }
         }
 
+        // Un anticipo en cero no es una operación válida: Doors igual crea la liquidación, con
+        // importe 0 y sin nada que liquidar, y después hay que anularla a mano (FAC-276, FAC-314).
+        // Se corta acá, antes de tocar Doors y antes de tomar el lock, así no queda nada a medias.
+        const sinAnticipo = facturasConMontos.filter(f => !(parseFloat(f.monto_anticipo) > 0));
+        if (sinAnticipo.length) {
+            return {
+                status: 400,
+                jsonBody: {
+                    ok: false,
+                    error: `Anticipo en cero para ${sinAnticipo.map(f => f.jira_factura_key).join(', ')}. `
+                         + `Revisá el porcentaje de anticipo de la cesión (o mandá monto_aprobado/porcentaje_anticipo en el body). `
+                         + `No se cargó nada en Doors.`,
+                },
+            };
+        }
+
         const lqf = lqfBase(facturas[0].sociedad);
 
         // Capa 1 — lock por cesión: impide que dos execute concurrentes trabajen la misma

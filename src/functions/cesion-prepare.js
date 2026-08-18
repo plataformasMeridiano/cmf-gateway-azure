@@ -23,8 +23,26 @@ app.http('cesion-prepare', {
         }
 
         let req;
-        try { req = await request.json(); }
-        catch { return { status: 400, jsonBody: { ok: false, error: 'Body JSON inválido' } }; }
+        try {
+            const crudo = await request.text();
+            try { req = JSON.parse(crudo); }
+            catch (pe) {
+                // "Body JSON inválido" a secas no alcanza para diagnosticar: el caso típico es un
+                // campo vacío en Jira que el zap interpola sin comillas y parte el JSON. Devolvemos
+                // el error de parseo con su posición y un recorte del body, así se ve qué campo es.
+                context.error('Body JSON inválido:', pe.message, '| body:', crudo.slice(0, 1000));
+                return {
+                    status: 400,
+                    jsonBody: {
+                        ok:            false,
+                        error:         `Body JSON inválido: ${pe.message}`,
+                        body_recibido: crudo.slice(0, 500),
+                    },
+                };
+            }
+        } catch (be) {
+            return { status: 400, jsonBody: { ok: false, error: `No se pudo leer el body: ${be.message}` } };
+        }
 
         const required = ['jira_factura_key','sociedad','cliente_codigo','fecha_operacion',
                           'fecha_dep','letra','prefijo','numero','fecha_emision',
@@ -77,8 +95,9 @@ app.http('cesion-prepare', {
         // Validar que no exista ya una row para este jira_factura_key en estado no-error
         const { data: jiraRows } = await supa
             .from('doors_liquidaciones_facturas')
-            .select('id, status')
-            .eq('jira_factura_key', req.jira_factura_key);
+            .select('id, status, created_at')
+            .eq('jira_factura_key', req.jira_factura_key)
+            .order('created_at', { ascending: false });
 
         const dupJira = (jiraRows || []).find(r => !ERROR_STATUSES.includes(r.status));
         if (dupJira) {
@@ -95,39 +114,51 @@ app.http('cesion-prepare', {
             };
         }
 
-        // Insertar row con todos los datos + status 'probing'
-        const { data: row, error: ie } = await supa
-            .from('doors_liquidaciones_facturas')
-            .insert({
-                jira_factura_key:     req.jira_factura_key,
-                jira_cesion_key:      req.jira_cesion_key      || null,
-                sociedad:             req.sociedad,
-                cliente_codigo:       req.cliente_codigo,
-                nro_escritura:        req.nro_escritura         || null,
-                tipo_ganancias:       req.tipo_ganancias        || '6',
-                tipo_documento:       req.tipo_documento,
-                porcentaje_anticipo:  req.porcentaje_anticipo   || 0,
-                porcentaje_garantia:  100 - (req.porcentaje_anticipo || 0),
-                monto_anticipo_total: req.monto_anticipo_total  || null,
-                observaciones:        req.observaciones         || null,
-                letra:               req.letra,
-                prefijo:             req.prefijo,
-                numero:              req.numero,
-                fecha_operacion:     parseDate(req.fecha_operacion),
-                fecha_emision:       parseDate(req.fecha_emision),
-                fecha_dep:           parseDate(req.fecha_dep),
-                // Guardamos las fechas en DD-MM-YYYY para pasarlas a Doors en execute
-                fecha_operacion_ddmmyyyy: toDdMmYyyy(req.fecha_operacion),
-                fecha_emision_ddmmyyyy:   toDdMmYyyy(req.fecha_emision),
-                fecha_dep_ddmmyyyy:       toDdMmYyyy(req.fecha_dep),
-                importe_original:    req.importe_original,
-                cuit_deudor:         req.cuit_deudor,
-                tasa_anual:          req.tasa_anual,
-                status:              'probing',
-                usuario_doors:       DOORS_USER,
-            })
-            .select()
-            .single();
+        // Si quedó una fila de un intento fallido, se reusa en lugar de insertar otra.
+        // Insertar dejaba la vieja en `error_probe` para siempre, y `cesion_pending_count`
+        // la sigue contando como pendiente: Zapier espera un 0 que nunca llega y la cesión
+        // queda trabada sin llegar nunca al execute (pasó con FAC-321 y FAC-323).
+        const filaFallada = (jiraRows || []).find(r => ERROR_STATUSES.includes(r.status));
+
+        const datos = {
+            jira_factura_key:     req.jira_factura_key,
+            jira_cesion_key:      req.jira_cesion_key      || null,
+            sociedad:             req.sociedad,
+            cliente_codigo:       req.cliente_codigo,
+            nro_escritura:        req.nro_escritura         || null,
+            tipo_ganancias:       req.tipo_ganancias        || '6',
+            tipo_documento:       req.tipo_documento,
+            porcentaje_anticipo:  req.porcentaje_anticipo   || 0,
+            porcentaje_garantia:  100 - (req.porcentaje_anticipo || 0),
+            monto_anticipo_total: req.monto_anticipo_total  || null,
+            observaciones:        req.observaciones         || null,
+            letra:               req.letra,
+            prefijo:             req.prefijo,
+            numero:              req.numero,
+            fecha_operacion:     parseDate(req.fecha_operacion),
+            fecha_emision:       parseDate(req.fecha_emision),
+            fecha_dep:           parseDate(req.fecha_dep),
+            // Guardamos las fechas en DD-MM-YYYY para pasarlas a Doors en execute
+            fecha_operacion_ddmmyyyy: toDdMmYyyy(req.fecha_operacion),
+            fecha_emision_ddmmyyyy:   toDdMmYyyy(req.fecha_emision),
+            fecha_dep_ddmmyyyy:       toDdMmYyyy(req.fecha_dep),
+            importe_original:    req.importe_original,
+            cuit_deudor:         req.cuit_deudor,
+            tasa_anual:          req.tasa_anual,
+            status:              'probing',
+            usuario_doors:       DOORS_USER,
+        };
+
+        const q = filaFallada
+            ? supa.from('doors_liquidaciones_facturas')
+                  .update({ ...datos, error_msg: null, processing_since: null })
+                  .eq('id', filaFallada.id)
+            : supa.from('doors_liquidaciones_facturas').insert(datos);
+
+        const { data: row, error: ie } = await q.select().single();
+        if (filaFallada) {
+            context.log(`Reusando fila fallada de ${req.jira_factura_key} (${filaFallada.status} → probing)`);
+        }
 
         if (ie) {
             context.error('Supabase insert error:', ie);
