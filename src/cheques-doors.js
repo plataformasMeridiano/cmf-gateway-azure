@@ -8,12 +8,14 @@
 //   val-pan3.php?id=N → grilla de ítems ya cargados
 //   val-pan4.php      → resumen; el id va en el POST, no en la URL
 //
-// Se entra por `val-pan0-tl1.php` = menú "Alta de Liquidación para pago Cesion" (id1401).
-// El otro menú, "Alta de Liquidación" (id777), llega a las MISMAS pantallas por
-// `val-pan0.php`, y lo único que los distingue es `SW_TL1` / `PAGINICIAL`. La pantalla no
-// dice en cuál estás — mismo problema que id1250/id1333 en facturas.
+// Se entra por `val-pan0.php` = menú "Liquidaciones → Alta de Liquidación" (id777),
+// confirmado con el usuario el 2026-08-25.
+// El otro menú, "Alta de Liquidación para pago Cesion" (id1401), llega a las MISMAS
+// pantallas por `val-pan0-tl1.php`, y lo único que los distingue es `SW_TL1`/`PAGINICIAL`
+// (vacío vs "1"). La pantalla no dice en cuál estás — mismo problema que id1250/id1333 en
+// facturas, donde cargar por el menú equivocado dejó liquidaciones con el tipo mal.
 
-const PAN0 = 'val-pan0-tl1.php';
+const PAN0 = 'val-pan0.php';
 
 // "1.234.567,89" → 1234567.89
 function numeroAr(txt) {
