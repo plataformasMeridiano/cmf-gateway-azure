@@ -3,6 +3,7 @@ const http        = require('http');
 const https       = require('https');
 const querystring = require('querystring');
 const zlib        = require('zlib');
+const crypto      = require('crypto');
 
 const SERVER         = 'http://mancia3.login-erp.com:82';
 const MNPC           = `${SERVER}/mnpc`;
@@ -30,16 +31,17 @@ class DoorsSession {
         return Object.entries(this._cookies).map(([k, v]) => `${k}=${v}`).join('; ');
     }
 
-    _raw(method, urlStr, formData, binary) {
+    // `cuerpo` es null o { buffer, contentType } ya armado por quien llama.
+    _raw(method, urlStr, cuerpo, binary) {
         return new Promise((resolve, reject) => {
-            const attempt = (m, u, fd) => {
+            const attempt = (m, u, c) => {
                 const parsed  = new URL(u);
                 const lib     = parsed.protocol === 'https:' ? https : http;
-                const body    = fd ? querystring.stringify(fd) : null;
+                const body    = c ? c.buffer : null;
                 const headers = { Authorization: BASIC_AUTH, Cookie: this._cookieStr() };
                 if (body) {
-                    headers['Content-Type']   = 'application/x-www-form-urlencoded';
-                    headers['Content-Length'] = Buffer.byteLength(body);
+                    headers['Content-Type']   = c.contentType;
+                    headers['Content-Length'] = body.length;
                 }
 
                 const req = lib.request({
@@ -67,12 +69,52 @@ class DoorsSession {
                 if (body) req.write(body);
                 req.end();
             };
-            attempt(method, urlStr, formData);
+            attempt(method, urlStr, cuerpo);
         });
     }
 
-    get(url, binary = false)            { return this._raw('GET',  url, null, binary); }
-    post(url, formData, binary = false) { return this._raw('POST', url, formData, binary); }
+    get(url, binary = false) { return this._raw('GET', url, null, binary); }
+
+    post(url, formData, binary = false) {
+        const cuerpo = formData ? {
+            buffer:      Buffer.from(querystring.stringify(formData), 'latin1'),
+            contentType: 'application/x-www-form-urlencoded',
+        } : null;
+        return this._raw('POST', url, cuerpo, binary);
+    }
+
+    /**
+     * POST multipart/form-data — para las pantallas de Doors que suben un archivo
+     * (la de liquidación de cheques sube el CSV de eCheqs en `val-pan2`).
+     *
+     * Los archivos se mandan tal cual vinieron, sin transcodificar: el CSV de Doors es
+     * ISO-8859-1 y pasarlo por UTF-8 le rompe los acentos del encabezado.
+     *
+     * @param {object} campos  pares nombre → valor del formulario
+     * @param {Array}  files   [{ campo, filename, contentType, data: Buffer }]
+     */
+    postMultipart(url, campos, files = [], binary = false) {
+        const sep    = '----DoorsForm' + crypto.randomBytes(16).toString('hex');
+        const partes = [];
+
+        for (const [k, v] of Object.entries(campos || {})) {
+            partes.push(Buffer.from(
+                `--${sep}\r\nContent-Disposition: form-data; name="${k}"\r\n\r\n${v ?? ''}\r\n`, 'latin1'));
+        }
+        for (const f of files) {
+            partes.push(Buffer.from(
+                `--${sep}\r\nContent-Disposition: form-data; name="${f.campo}"; filename="${f.filename}"\r\n` +
+                `Content-Type: ${f.contentType || 'application/octet-stream'}\r\n\r\n`, 'latin1'));
+            partes.push(Buffer.isBuffer(f.data) ? f.data : Buffer.from(f.data, 'latin1'));
+            partes.push(Buffer.from('\r\n', 'latin1'));
+        }
+        partes.push(Buffer.from(`--${sep}--\r\n`, 'latin1'));
+
+        return this._raw('POST', url, {
+            buffer:      Buffer.concat(partes),
+            contentType: `multipart/form-data; boundary=${sep}`,
+        }, binary);
+    }
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
