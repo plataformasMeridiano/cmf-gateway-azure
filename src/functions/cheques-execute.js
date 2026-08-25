@@ -1,7 +1,18 @@
 const { app } = require('@azure/functions');
 const { DoorsSession, makeSupa, login } = require('../doors-helpers');
 const { parseCsvCheques } = require('../cheques-csv');
-const { crearLiquidacionCheques } = require('../cheques-doors');
+const { crearLiquidacionCheques, MODALIDADES } = require('../cheques-doors');
+
+// La modalidad la elige una persona al disparar la transición en Jira: no sale de los datos
+// de CMF ni se puede derivar. Se acepta el nombre ("ECHEQ_EN_GARANTIA") o el código ("915").
+function normalizarModalidad(valor) {
+    if (valor == null || String(valor).trim() === '') return null;
+    const v = String(valor).trim().toUpperCase()
+        .normalize('NFD').replace(/[̀-ͯ]/g, '')
+        .replace(/[\s-]+/g, '_');
+    if (MODALIDADES[v]) return MODALIDADES[v];
+    return Object.values(MODALIDADES).includes(v) ? v : null;
+}
 
 const SERVER = 'http://mancia3.login-erp.com:82';
 const FN     = `${SERVER}/mnpc/finan_fn`;   // los cheques van bajo MNPC, no bajo la sociedad
@@ -74,6 +85,15 @@ app.http('cheques-execute', {
             return { status: 400, jsonBody: { ok: false, error: 'Falta el archivo: mandá csv_url, o csv_bucket + csv_path' } };
         }
 
+        // Sin modalidad no se procesa: cargar un lote de garantía como cartera lo deja mal
+        // clasificado en Doors y no se nota mirando la liquidación.
+        const modalidad = normalizarModalidad(body.modalidad);
+        if (!modalidad) {
+            return { status: 400, jsonBody: { ok: false,
+                error: `modalidad inválida o ausente: ${JSON.stringify(body.modalidad ?? null)}. ` +
+                       `Valores válidos: ${Object.keys(MODALIDADES).join(', ')} (o su código).` } };
+        }
+
         const confirmar = body.confirmar === true || body.confirmar === 'true';
         if (confirmar && !PERMITIR_CONFIRMAR) {
             return { status: 409, jsonBody: { ok: false,
@@ -92,6 +112,7 @@ app.http('cheques-execute', {
             moneda:          body.moneda          ?? DEFAULTS.moneda,
             observacion:     body.observacion,
             lector:          body.lector,
+            modalidad,
         };
 
         const supa = makeSupa();
@@ -130,7 +151,7 @@ app.http('cheques-execute', {
         const s = new DoorsSession();
         try {
             await login(s);
-            context.log(`Login Doors OK | operación ${body.operacion_key} | ${csv.cantidad} cheques por ${csv.monto} | confirmar=${confirmar}`);
+            context.log(`Login Doors OK | operación ${body.operacion_key} | ${csv.cantidad} cheques por ${csv.monto} | modalidad=${modalidad} | confirmar=${confirmar}`);
 
             const r = await crearLiquidacionCheques(s, FN, cab, archivo, csv, confirmar);
             context.log(`Registro ${r.recId} | confirmado=${r.confirmado} | liq=${r.liqNum}`);
@@ -144,6 +165,7 @@ app.http('cheques-execute', {
                     doors_liq_numero: r.liqNum,
                     cantidad_cheques: csv.cantidad,
                     monto_total:      csv.monto,
+                    modalidad,
                     resumen:          r.resumen,
                     // en modo simulación el registro queda abierto en Doors, en estado Alta
                     aviso: r.confirmado ? null

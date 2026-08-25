@@ -50,9 +50,87 @@ function formularios(html) {
     return out;
 }
 
+// El campo BANCO del ítem no es el banco emisor: es la MODALIDAD del instrumento.
+// El banco real queda implícito en el CMC7. El importador del CSV deja todo en ECHEQ (99)
+// porque el archivo no tiene columna de modalidad, así que para el resto hay que editar.
+const MODALIDADES = {
+    ECHEQ:                    '99',
+    ECHEQ_BURSATIL:          '101',
+    ECHEQ_BURSATIL_FD:       '102',
+    ECHEQ_PLATAFORMAS:       '117',
+    ECHEQS_AVALADOS:         '121',
+    ECHEQ_EN_GARANTIA:       '915',
+    ECHEQ_EN_CUSTODIA:       '917',
+    CHEQUE_FISICO_EN_GARANTIA: '916',
+    CHEQUE_FISICO_EN_CUSTODIA: '918',
+};
+
+// Filas de la grilla de ítems de val-pan3. Se reconocen por el onClick del <tr>.
+function parsearGrilla(html) {
+    const filas = [];
+    for (const tr of html.matchAll(/<tr\b[^>]*fClick\(this\)[^>]*>([\s\S]*?)<\/tr>/gi)) {
+        const celdas = [...tr[1].matchAll(/<td\b[^>]*>([\s\S]*?)<\/td>/gi)]
+            .map(c => c[1].replace(/<[^>]+>/g, '').replace(/&nbsp;?/gi, ' ').trim());
+        if (celdas.length < 12 || !/^\d+$/.test(celdas[0])) continue;
+        filas.push({
+            item:       parseInt(celdas[0], 10),
+            banco:      celdas[1],
+            sucursal:   celdas[2],
+            cp:         celdas[3],
+            cuenta:     celdas[4],
+            nro_cheque: celdas[5],
+            firmante1:  celdas[6],
+            dias:       celdas[8],
+            fecha_dep:  celdas[9],
+            fecha_acred: celdas[10],
+            importe:    numeroAr(celdas[11]),
+        });
+    }
+    return filas;
+}
+
 function errorDoors(paso, html, url) {
     const t = textoPlano(html).trim().slice(0, 400);
     return new Error(`Doors rechazó el paso ${paso}${url ? ` (url: ${url})` : ''}: ${t}`);
+}
+
+/**
+ * Cambia la modalidad (campo BANCO) de todos los ítems ya importados.
+ *
+ * Hace falta porque el CSV no tiene columna de modalidad: el importador deja todo en
+ * ECHEQ (99), así que un lote en garantía o custodia queda mal cargado si no se corrige.
+ * Es lo mismo que hoy se hace a mano, ítem por ítem.
+ *
+ * Se conserva el upload en vez de cargar los ítems nosotros por dos razones: no sabemos
+ * qué valida el importador de Doors, y el CSV queda como comprobante de lo que se subió.
+ *
+ * Los campos de cada ítem se reenvían tal cual los devuelve Doors — solo se pisa BANCO.
+ * Retipear el resto sería reescribir datos que ya están bien.
+ */
+async function cambiarModalidad(s, fn, recId, codigo, cantidad) {
+    for (let item = 1; item <= cantidad; item++) {
+        // Abrir el ítem para edición (CONF=0 muestra el formulario con los valores cargados)
+        const ab = await s.post(`${fn}/val-pan3.php`, {
+            id: recId, ABM: 'A', ABMITEM: 'M', ITEM: String(item), CONF: '0', SCROLL: '',
+        });
+        const campos = formularios(ab.body).formItem;
+        if (!campos || !('BANCO' in campos)) {
+            throw errorDoors(`apertura del ítem ${item} para cambiar la modalidad`, ab.body);
+        }
+
+        const r = await s.post(`${fn}/val-pan3.php`, {
+            ...campos,
+            id: recId, ABM: 'A', ABMITEM: 'M', ITEM: String(item), CONF: '1',
+            BANCO: codigo,
+        });
+        const grilla = parsearGrilla(r.body);
+        const fila   = grilla.find(f => f.item === item);
+        if (!fila || fila.banco !== codigo) {
+            throw new Error(
+                `No se pudo poner la modalidad ${codigo} en el ítem ${item} ` +
+                `(quedó en ${fila ? fila.banco : 'desconocido'}). No se confirmó nada.`);
+        }
+    }
 }
 
 /**
@@ -118,6 +196,22 @@ async function crearLiquidacionCheques(s, fn, cab, archivo, totales, confirmar) 
             `${totales.cantidad} por ${totales.monto}. No se confirmó nada.`);
     }
 
+    // ── modalidad ─────────────────────────────────────────────────────────────
+    // El lote entero comparte modalidad (un archivo por modalidad). Si no es ECHEQ,
+    // hay que editar cada ítem: el importador no la puede setear.
+    if (cab.modalidad !== MODALIDADES.ECHEQ) {
+        await cambiarModalidad(s, fn, recId, cab.modalidad, cargados);
+    }
+    // Releer la grilla y verificar que TODOS quedaron con el código correcto: una edición
+    // a medias deja un lote mezclado, que es peor que uno mal cargado entero.
+    const grilla = parsearGrilla((await s.get(`${fn}/val-pan3.php?id=${recId}`)).body);
+    const mal = grilla.filter(f => f.banco !== cab.modalidad);
+    if (grilla.length !== cargados || mal.length) {
+        throw new Error(
+            `Quedaron ${mal.length} de ${grilla.length} ítems con una modalidad distinta de ` +
+            `${cab.modalidad} (ítems ${mal.map(f => f.item).join(', ')}). No se confirmó nada.`);
+    }
+
     // ── pan4: resumen ─────────────────────────────────────────────────────────
     const r4 = await s.post(`${fn}/val-pan4.php`, { ABM: 'A', id: recId });
     const texto = textoPlano(r4.body);
@@ -155,4 +249,8 @@ async function crearLiquidacionCheques(s, fn, cab, archivo, totales, confirmar) 
     return { recId, liqNum: mn[1], confirmado: true, resumen };
 }
 
-module.exports = { crearLiquidacionCheques, numeroAr, textoPlano, formularios, PAN0 };
+module.exports = {
+    crearLiquidacionCheques, cambiarModalidad,
+    numeroAr, textoPlano, formularios, parsearGrilla,
+    MODALIDADES, PAN0,
+};
