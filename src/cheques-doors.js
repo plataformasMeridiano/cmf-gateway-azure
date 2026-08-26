@@ -54,34 +54,39 @@ function formularios(html) {
 // real queda implícito en el CMC7. El importador del CSV deja todo en ECHEQ (99) porque el
 // archivo no tiene columna de modalidad, así que para el resto hay que editar.
 //
-// La modalidad se arma cruzando dos datos que vienen de lados distintos:
-//   tipo    — ECHEQ o FISICO. Sale de nuestros datos (en Jira son dos issue types).
-//   destino — cartera, garantía, custodia… Lo elige una persona al disparar la transición:
-//             no está en CMF ni se puede derivar.
-const CODIGOS = {
+// El código sale de cruzar dos datos que vienen de lados distintos, los dos de Jira:
+//   issue type id — 10419 ECheq / 10168 Cheque (físico). Es el tipo del ticket, un int.
+//   modalidad     — el valor del combo que elige la persona al disparar la transición.
+//                   No está en CMF ni se puede derivar.
+//
+// Los dos llegan de custom fields controlados, así que el match es EXACTO: no se
+// normalizan mayúsculas ni acentos. Si el combo emite algo que no está acá, es un error
+// de configuración y tiene que fallar ruidoso, no acomodarse en silencio.
+const ISSUE_TYPES = {
+    10419: 'ECHEQ',    // ECheq
+    10168: 'FISICO',   // Cheque (físicos)
+};
+
+const BANCOS = {
     ECHEQ:  { CARTERA: '99', BURSATIL: '101', BURSATIL_FD: '102', PLATAFORMAS: '117',
               AVALADOS: '121', GARANTIA: '915', CUSTODIA: '917' },
     FISICO: { GARANTIA: '916', CUSTODIA: '918' },
 };
 
-const TIPOS    = Object.keys(CODIGOS);
-const DESTINOS = [...new Set(Object.values(CODIGOS).flatMap(d => Object.keys(d)))];
-
-// Todos los códigos conocidos, para validar lo que devuelve la grilla.
-const MODALIDADES = Object.fromEntries(
-    Object.entries(CODIGOS).flatMap(([t, ds]) => Object.entries(ds).map(([d, c]) => [`${t}_${d}`, c])));
+const MODALIDADES = [...new Set(Object.values(BANCOS).flatMap(m => Object.keys(m)))];
 
 /**
- * Código de BANCO para un (tipo, destino). Devuelve null si la combinación no existe,
- * para que el caller la rechace en vez de caer en un default.
+ * Código del campo BANCO para un (issue type id, modalidad). Devuelve null si la
+ * combinación no existe, para que el caller la rechace en vez de caer en un default.
  *
  * Ojo: **no conocemos el código de FISICO + CARTERA**. En el lookup de Doors, buscando
  * `%fisi` solo aparecen "CHEQUE FISICO EN GARANTIA" (916) y "EN CUSTODIA" (918). Es
  * probable que un físico en cartera se cargue con el banco real del cheque —a diferencia
  * del eCheq, que no tiene sucursal— pero no está verificado, así que no se asume.
  */
-function codigoModalidad(tipo, destino) {
-    return (CODIGOS[tipo] || {})[destino] || null;
+function bancoDeModalidad(issueTypeId, modalidad) {
+    const tipo = ISSUE_TYPES[issueTypeId];
+    return tipo ? (BANCOS[tipo] || {})[modalidad] || null : null;
 }
 
 // Filas de la grilla de ítems de val-pan3. Se reconocen por el onClick del <tr>.
@@ -218,17 +223,17 @@ async function crearLiquidacionCheques(s, fn, cab, archivo, totales, confirmar) 
     // ── modalidad ─────────────────────────────────────────────────────────────
     // El lote entero comparte modalidad (un archivo por modalidad). Si no es ECHEQ,
     // hay que editar cada ítem: el importador no la puede setear.
-    if (cab.modalidad !== MODALIDADES.ECHEQ) {
-        await cambiarModalidad(s, fn, recId, cab.modalidad, cargados);
+    if (cab.banco !== BANCOS.ECHEQ.CARTERA) {
+        await cambiarModalidad(s, fn, recId, cab.banco, cargados);
     }
     // Releer la grilla y verificar que TODOS quedaron con el código correcto: una edición
     // a medias deja un lote mezclado, que es peor que uno mal cargado entero.
     const grilla = parsearGrilla((await s.get(`${fn}/val-pan3.php?id=${recId}`)).body);
-    const mal = grilla.filter(f => f.banco !== cab.modalidad);
+    const mal = grilla.filter(f => f.banco !== cab.banco);
     if (grilla.length !== cargados || mal.length) {
         throw new Error(
             `Quedaron ${mal.length} de ${grilla.length} ítems con una modalidad distinta de ` +
-            `${cab.modalidad} (ítems ${mal.map(f => f.item).join(', ')}). No se confirmó nada.`);
+            `${cab.banco} (ítems ${mal.map(f => f.item).join(', ')}). No se confirmó nada.`);
     }
 
     // ── pan4: resumen ─────────────────────────────────────────────────────────
@@ -271,5 +276,5 @@ async function crearLiquidacionCheques(s, fn, cab, archivo, totales, confirmar) 
 module.exports = {
     crearLiquidacionCheques, cambiarModalidad,
     numeroAr, textoPlano, formularios, parsearGrilla,
-    codigoModalidad, CODIGOS, TIPOS, DESTINOS, MODALIDADES, PAN0,
+    bancoDeModalidad, ISSUE_TYPES, BANCOS, MODALIDADES, PAN0,
 };

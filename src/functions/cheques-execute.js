@@ -1,16 +1,7 @@
 const { app } = require('@azure/functions');
 const { DoorsSession, makeSupa, login } = require('../doors-helpers');
 const { parseCsvCheques } = require('../cheques-csv');
-const { crearLiquidacionCheques, codigoModalidad, TIPOS, DESTINOS } = require('../cheques-doors');
-
-// Sin acentos, sin espacios, en mayúsculas: "Echeq en Garantía" y "ECHEQ_EN_GARANTIA"
-// tienen que llegar al mismo lugar, porque uno sale de un combo de Jira y el otro de código.
-function clave(valor) {
-    if (valor == null || String(valor).trim() === '') return null;
-    return String(valor).trim().toUpperCase()
-        .normalize('NFD').replace(/[\u0300-\u036f]/g, '')
-        .replace(/[\s-]+/g, '_');
-}
+const { crearLiquidacionCheques, bancoDeModalidad, ISSUE_TYPES, MODALIDADES } = require('../cheques-doors');
 
 const SERVER = 'http://mancia3.login-erp.com:82';
 const FN     = `${SERVER}/mnpc/finan_fn`;   // los cheques van bajo MNPC, no bajo la sociedad
@@ -83,26 +74,27 @@ app.http('cheques-execute', {
             return { status: 400, jsonBody: { ok: false, error: 'Falta el archivo: mandá csv_url, o csv_bucket + csv_path' } };
         }
 
-        // La modalidad sale de cruzar el tipo de cheque (dato nuestro) con el destino que
-        // eligió la persona. Ninguno de los dos se asume: cargar un lote de garantía como
-        // cartera lo deja mal clasificado en Doors y no se nota mirando la liquidación.
-        const tipo    = clave(body.tipo_cheque);
-        const destino = clave(body.destino);
-        if (!TIPOS.includes(tipo)) {
+        // Los dos salen de custom fields de Jira, así que el match es exacto: no se
+        // normaliza nada. Si el combo emite otro valor es un error de configuración y tiene
+        // que verse. Ninguno se asume: cargar un lote de garantía como cartera lo deja mal
+        // clasificado en Doors y no se nota mirando la liquidación.
+        const issueTypeId = String(body.issue_type_id ?? '');
+        const modalidad   = body.modalidad;
+        if (!ISSUE_TYPES[issueTypeId]) {
             return { status: 400, jsonBody: { ok: false,
-                error: `tipo_cheque inválido o ausente: ${JSON.stringify(body.tipo_cheque ?? null)}. ` +
-                       `Valores válidos: ${TIPOS.join(', ')}.` } };
+                error: `issue_type_id inválido o ausente: ${JSON.stringify(body.issue_type_id ?? null)}. ` +
+                       `Valores válidos: ${Object.entries(ISSUE_TYPES).map(([k, v]) => `${k} (${v})`).join(', ')}.` } };
         }
-        if (!DESTINOS.includes(destino)) {
+        if (!MODALIDADES.includes(modalidad)) {
             return { status: 400, jsonBody: { ok: false,
-                error: `destino inválido o ausente: ${JSON.stringify(body.destino ?? null)}. ` +
-                       `Valores válidos: ${DESTINOS.join(', ')}.` } };
+                error: `modalidad inválida o ausente: ${JSON.stringify(modalidad ?? null)}. ` +
+                       `Valores válidos: ${MODALIDADES.join(', ')}.` } };
         }
-        const modalidad = codigoModalidad(tipo, destino);
-        if (!modalidad) {
+        const banco = bancoDeModalidad(issueTypeId, modalidad);
+        if (!banco) {
             return { status: 422, jsonBody: { ok: false,
-                error: `No conocemos el código de Doors para ${tipo} + ${destino}. ` +
-                       `Hay que buscarlo en el lookup del campo Banco (val-pan3) y agregarlo a CODIGOS.` } };
+                error: `No conocemos el código de Doors para ${ISSUE_TYPES[issueTypeId]} + ${modalidad}. ` +
+                       `Hay que buscarlo en el lookup del campo Banco (val-pan3) y agregarlo a BANCOS.` } };
         }
 
         const confirmar = body.confirmar === true || body.confirmar === 'true';
@@ -123,7 +115,7 @@ app.http('cheques-execute', {
             moneda:          body.moneda          ?? DEFAULTS.moneda,
             observacion:     body.observacion,
             lector:          body.lector,
-            modalidad,
+            banco,
         };
 
         const supa = makeSupa();
@@ -162,7 +154,7 @@ app.http('cheques-execute', {
         const s = new DoorsSession();
         try {
             await login(s);
-            context.log(`Login Doors OK | operación ${body.operacion_key} | ${csv.cantidad} cheques por ${csv.monto} | ${tipo}+${destino}=${modalidad} | confirmar=${confirmar}`);
+            context.log(`Login Doors OK | operación ${body.operacion_key} | ${csv.cantidad} cheques por ${csv.monto} | ${ISSUE_TYPES[issueTypeId]}+${modalidad}=banco ${banco} | confirmar=${confirmar}`);
 
             const r = await crearLiquidacionCheques(s, FN, cab, archivo, csv, confirmar);
             context.log(`Registro ${r.recId} | confirmado=${r.confirmado} | liq=${r.liqNum}`);
@@ -176,9 +168,9 @@ app.http('cheques-execute', {
                     doors_liq_numero: r.liqNum,
                     cantidad_cheques: csv.cantidad,
                     monto_total:      csv.monto,
-                    tipo_cheque:      tipo,
-                    destino,
+                    tipo_cheque:      ISSUE_TYPES[issueTypeId],
                     modalidad,
+                    banco,
                     resumen:          r.resumen,
                     // en modo simulación el registro queda abierto en Doors, en estado Alta
                     aviso: r.confirmado ? null
