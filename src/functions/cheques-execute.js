@@ -1,17 +1,15 @@
 const { app } = require('@azure/functions');
 const { DoorsSession, makeSupa, login } = require('../doors-helpers');
 const { parseCsvCheques } = require('../cheques-csv');
-const { crearLiquidacionCheques, MODALIDADES } = require('../cheques-doors');
+const { crearLiquidacionCheques, codigoModalidad, TIPOS, DESTINOS } = require('../cheques-doors');
 
-// La modalidad la elige una persona al disparar la transición en Jira: no sale de los datos
-// de CMF ni se puede derivar. Se acepta el nombre ("ECHEQ_EN_GARANTIA") o el código ("915").
-function normalizarModalidad(valor) {
+// Sin acentos, sin espacios, en mayúsculas: "Echeq en Garantía" y "ECHEQ_EN_GARANTIA"
+// tienen que llegar al mismo lugar, porque uno sale de un combo de Jira y el otro de código.
+function clave(valor) {
     if (valor == null || String(valor).trim() === '') return null;
-    const v = String(valor).trim().toUpperCase()
-        .normalize('NFD').replace(/[̀-ͯ]/g, '')
+    return String(valor).trim().toUpperCase()
+        .normalize('NFD').replace(/[\u0300-\u036f]/g, '')
         .replace(/[\s-]+/g, '_');
-    if (MODALIDADES[v]) return MODALIDADES[v];
-    return Object.values(MODALIDADES).includes(v) ? v : null;
 }
 
 const SERVER = 'http://mancia3.login-erp.com:82';
@@ -85,13 +83,26 @@ app.http('cheques-execute', {
             return { status: 400, jsonBody: { ok: false, error: 'Falta el archivo: mandá csv_url, o csv_bucket + csv_path' } };
         }
 
-        // Sin modalidad no se procesa: cargar un lote de garantía como cartera lo deja mal
-        // clasificado en Doors y no se nota mirando la liquidación.
-        const modalidad = normalizarModalidad(body.modalidad);
-        if (!modalidad) {
+        // La modalidad sale de cruzar el tipo de cheque (dato nuestro) con el destino que
+        // eligió la persona. Ninguno de los dos se asume: cargar un lote de garantía como
+        // cartera lo deja mal clasificado en Doors y no se nota mirando la liquidación.
+        const tipo    = clave(body.tipo_cheque);
+        const destino = clave(body.destino);
+        if (!TIPOS.includes(tipo)) {
             return { status: 400, jsonBody: { ok: false,
-                error: `modalidad inválida o ausente: ${JSON.stringify(body.modalidad ?? null)}. ` +
-                       `Valores válidos: ${Object.keys(MODALIDADES).join(', ')} (o su código).` } };
+                error: `tipo_cheque inválido o ausente: ${JSON.stringify(body.tipo_cheque ?? null)}. ` +
+                       `Valores válidos: ${TIPOS.join(', ')}.` } };
+        }
+        if (!DESTINOS.includes(destino)) {
+            return { status: 400, jsonBody: { ok: false,
+                error: `destino inválido o ausente: ${JSON.stringify(body.destino ?? null)}. ` +
+                       `Valores válidos: ${DESTINOS.join(', ')}.` } };
+        }
+        const modalidad = codigoModalidad(tipo, destino);
+        if (!modalidad) {
+            return { status: 422, jsonBody: { ok: false,
+                error: `No conocemos el código de Doors para ${tipo} + ${destino}. ` +
+                       `Hay que buscarlo en el lookup del campo Banco (val-pan3) y agregarlo a CODIGOS.` } };
         }
 
         const confirmar = body.confirmar === true || body.confirmar === 'true';
@@ -151,7 +162,7 @@ app.http('cheques-execute', {
         const s = new DoorsSession();
         try {
             await login(s);
-            context.log(`Login Doors OK | operación ${body.operacion_key} | ${csv.cantidad} cheques por ${csv.monto} | modalidad=${modalidad} | confirmar=${confirmar}`);
+            context.log(`Login Doors OK | operación ${body.operacion_key} | ${csv.cantidad} cheques por ${csv.monto} | ${tipo}+${destino}=${modalidad} | confirmar=${confirmar}`);
 
             const r = await crearLiquidacionCheques(s, FN, cab, archivo, csv, confirmar);
             context.log(`Registro ${r.recId} | confirmado=${r.confirmado} | liq=${r.liqNum}`);
@@ -165,6 +176,8 @@ app.http('cheques-execute', {
                     doors_liq_numero: r.liqNum,
                     cantidad_cheques: csv.cantidad,
                     monto_total:      csv.monto,
+                    tipo_cheque:      tipo,
+                    destino,
                     modalidad,
                     resumen:          r.resumen,
                     // en modo simulación el registro queda abierto en Doors, en estado Alta
