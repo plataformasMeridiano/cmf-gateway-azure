@@ -40,6 +40,9 @@ const ALLOWED_SECRETS = new Set([
   "ALYCBUR-LEGAJOS-PASSWORD", "ALYCBUR-LEGAJOS-USUARIO",
   "ST-SECURITIES-PASSWORD", "ST-SECURITIES-USUARIO",
   "COHEN-PASSWORD", "COHEN-USUARIO",
+  // 2ª cuenta de Valo (finanzas@), alta 2026-08-27. La original (VALO-PASSWORD)
+  // sigue siendo la de info@ — son dos cuentas distintas, no un reemplazo.
+  "VALO-FINANZAS-PASSWORD", "VALO-FINANZAS-USUARIO",
 ]);
 
 const kvClient = new SecretClient(VAULT_URL, new ManagedIdentityCredential());
