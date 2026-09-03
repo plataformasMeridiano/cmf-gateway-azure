@@ -348,10 +348,13 @@ async function crearLiquidacion(s, lqf, row) {
     }
 
     const importe = row.importe_efectivo ?? row.importe_original;
-    // El % se deriva del bruto y el neto de la FACTURA, que es a lo que corresponden esos
-    // dos montos. Después se aplica sobre el importe que realmente va a Doors (el efectivo,
-    // ya descontadas las NC/ND), así la alícuota queda bien y el neto escala con el importe.
-    const poriva  = porcentajeIva(row.monto_bruto, row.monto_neto);
+    // El bruto es `importe_original` — verificado contra 25 facturas: coincide siempre con
+    // el "Monto" de Jira. No se recibe aparte para no tener dos campos que deban coincidir
+    // sin nadie que lo garantice: si llegaran distintos, el IMPORTE saldría de uno y el %
+    // del otro, y quedarían descalzados justo en la base de la retención.
+    // El % se aplica después sobre el importe efectivo (ya descontadas las NC/ND), así la
+    // alícuota queda bien y el neto escala con el importe que realmente va.
+    const poriva  = porcentajeIva(row.importe_original, row.monto_neto);
 
     const camposItem = {
         id: recId, CONF: '1', ABM: 'A', ABMITEM: '', ITEM: '', SCROLL: '',

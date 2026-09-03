@@ -127,11 +127,10 @@ app.http('cesion-prepare', {
             cliente_codigo:       req.cliente_codigo,
             nro_escritura:        req.nro_escritura         || null,
             tipo_ganancias:       req.tipo_ganancias        || '6',
-            // Bruto y neto de la factura ("Monto" y "Monto Neto" en Jira). De la diferencia
-            // entre los dos sale el % que pide Doors (campo PORIVA de fac-pan3). Se guardan
-            // los montos porque son el dato cargado; el % es derivado.
-            // Iguales o ausentes ⇒ la factura no lleva IVA y el campo va vacío.
-            monto_bruto:          req.monto_bruto           ?? null,
+            // Neto de la factura ("Monto Neto" en Jira). El bruto ya es `importe_original`,
+            // así que no se pide aparte. De la diferencia entre los dos sale el % que pide
+            // Doors (campo PORIVA de fac-pan3); se guarda el monto porque es el dato cargado
+            // y el % es derivado. Ausente o igual al bruto ⇒ sin IVA, el campo va vacío.
             monto_neto:           req.monto_neto            ?? null,
             tipo_documento:       req.tipo_documento,
             porcentaje_anticipo:  req.porcentaje_anticipo   || 0,
