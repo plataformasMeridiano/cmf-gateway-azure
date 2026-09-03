@@ -143,6 +143,76 @@ function toDdMmYyyy(input) {
     return input;  // ya es DD-MM-YYYY
 }
 
+// Campos de un <form> concreto de la página, por su atributo name. Se reenvían tal cual
+// vinieron: son formularios con muchos ocultos de configuración y hardcodearlos es frágil.
+function camposDeFormulario(html, nombre) {
+    for (const trozo of html.split(/<form\b/i).slice(1)) {
+        const cab = trozo.slice(0, trozo.indexOf('>') + 1);
+        if (((cab.match(/name\s*=\s*["']([^"']+)["']/i) || [])[1]) !== nombre) continue;
+        const cuerpo = trozo.slice(0, trozo.search(/<\/form>/i));
+        const campos = {};
+        for (const m of cuerpo.matchAll(/<(input|select|textarea)\b[^>]*>/gi)) {
+            const g = (a) => (m[0].match(new RegExp(`${a}\\s*=\\s*["']([^"']*)["']`, 'i')) || [])[1];
+            const n = g('name');
+            if (n && (g('type') || '').toLowerCase() !== 'file') campos[n] = g('value') ?? '';
+        }
+        return campos;
+    }
+    return null;
+}
+
+// Total de "Imp.Original" al pie de la grilla de ítems de fac-pan3 — el primer número de
+// la fila que arranca con "Total". Sirve para confirmar que el ítem realmente entró.
+function totalGrilla(html) {
+    const m = html.replace(/<[^>]+>/g, '|').replace(/&nbsp;?/gi, ' ')
+                  .match(/Total\s*\|+\s*(-?[\d.]*\d(?:,\d{2})?)/i);
+    if (!m) return null;
+    return parseFloat(m[1].replace(/\./g, '').replace(',', '.'));
+}
+
+// Alícuotas de IVA vigentes en Argentina. El porcentaje se deriva de una división entre
+// dos importes redondeados a centavos, así que puede salir 20,999998 en vez de 21: si cae
+// bien cerca de una alícuota real, se ajusta.
+const ALICUOTAS_IVA = [0, 2.5, 5, 10.5, 21, 27];
+const TOLERANCIA_ALICUOTA = 0.05;   // en puntos porcentuales
+
+/**
+ * Porcentaje de IVA a partir del monto de IVA y el importe bruto de la factura.
+ *
+ *   neto = importe - montoIva          (lo que no es IVA)
+ *   %    = montoIva / neto * 100
+ *
+ * Devuelve null si no hay IVA (monto 0 o ausente) ⇒ el campo va vacío, como lo deja la
+ * pantalla por defecto.
+ *
+ * Si el resultado no cae cerca de ninguna alícuota **no se fuerza**: una factura con dos
+ * alícuotas mezcladas da un porcentaje intermedio que es legítimo, y además es el único
+ * que reproduce el neto correcto (el % se dedujo justamente para que dé ese neto).
+ * Redondearlo a 21 movería la base de la retención de verdad.
+ */
+function porcentajeIva(montoIva, importeBruto) {
+    const iva = Number(montoIva) || 0;
+    const imp = Number(importeBruto) || 0;
+    if (iva <= 0 || imp <= 0) return null;
+
+    const neto = imp - iva;
+    if (neto <= 0) throw new Error(`El IVA (${iva}) no puede ser mayor o igual al importe (${imp})`);
+
+    const crudo = (iva / neto) * 100;
+    const cerca = ALICUOTAS_IVA.find(a => Math.abs(crudo - a) <= TOLERANCIA_ALICUOTA);
+    return cerca ?? Math.round(crudo * 100) / 100;
+}
+
+// Base de la retención de ganancias. Es exactamente el `Vporiva()` del JS de fac-pan3:
+//   neto = redondear(importe / (1 + iva/100), 2)
+// Doors NO lo calcula del lado del servidor — lo calcula el navegador y lo manda en un campo
+// oculto. Como nosotros no ejecutamos ese JS, lo replicamos acá. Si mandáramos el importe
+// bruto como neto, la retención saldría sobre una base más alta de la que corresponde.
+function netoGanancias(importe, porcentaje) {
+    const iva = 1 + (Number(porcentaje) || 0) / 100;
+    return Math.round((Number(importe) / iva) * 100) / 100;
+}
+
 function makeSupa() {
     const { createClient } = require('@supabase/supabase-js');
     return createClient(
@@ -278,31 +348,60 @@ async function crearLiquidacion(s, lqf, row) {
         throw doorsError('pan2 (cabecera)', r2.body);
     }
 
-    const r3 = await s.post(`${lqf}/fac-pan3.php`, {
+    const importe = row.importe_efectivo ?? row.importe_original;
+    // El % se deriva del importe ORIGINAL de la factura, que es al que corresponde el monto
+    // de IVA. Después se aplica sobre el importe que realmente va a Doors (el efectivo, ya
+    // descontadas las NC/ND), así la alícuota queda bien y el neto escala con el importe.
+    const poriva  = porcentajeIva(row.monto_iva, row.importe_original);
+
+    const camposItem = {
         id: recId, CONF: '1', ABM: 'A', ABMITEM: '', ITEM: '', SCROLL: '',
         LET:     row.letra,
         PREF:    row.prefijo,
         NUM:     row.numero,
         FECDEP:  row.fecha_dep_ddmmyyyy,
         FECEMI:  row.fecha_emision_ddmmyyyy,
-        IMPORTE: String(row.importe_efectivo ?? row.importe_original),
-        PORIVA:  '0',
-        NETO:    String(row.importe_efectivo ?? row.importe_original),
+        IMPORTE: String(importe),
+        PORIVA:  poriva == null ? '' : String(poriva),
+        NETO:    String(netoGanancias(importe, poriva)),
         VALCAR: '', MAV: '', IMP_ME: '',
         FIR1:     row.cuit_deudor,
         FIR1_ANT: '',
         FIR1_NOM: row.razon_social,
-    });
-    // pan3 OK: el ítem debe aparecer en la grilla
-    // Doors muestra el número sin ceros a la izquierda (ej: "1234" no "00001234")
-    const numeroSinCeros = row.numero ? String(parseInt(row.numero, 10)) : null;
-    if (numeroSinCeros && !r3.body.includes(numeroSinCeros)) {
-        throw doorsError('pan3 (ítem factura)', r3.body);
-    }
-    // Detectar advertencia de factura duplicada en Doors
+    };
+    let r3 = await s.post(`${lqf}/fac-pan3.php`, camposItem);
+    // Doors avisa "Factura ya ingresado en liq NNNNN item N — ¿Quiere cargarla de todas
+    // maneras?" y NO agrega el ítem hasta que se responda. La advertencia no filtra por
+    // cliente, así que puede ser de otro comitente: se responde que sí.
+    //
+    // Responder es re-postear el ítem con CONTINUA=1 — es lo que hace el botón "Sí", que
+    // submitea `formCont`, un espejo oculto de `formItem`. Se reenvían los campos tal como
+    // los devolvió Doors, no los nuestros, para no perder nada que la pantalla haya agregado.
+    //
+    // OJO: un intento anterior (b730dd7, revertido) se limitó a NO tirar el error y siguió
+    // derecho a pan4. Doors quedó esperando la respuesta, el ítem nunca entró, y se
+    // confirmaron cabeceras vacías: las liq 48376 y 48377 quedaron con importe 0.
+    let dupAviso = null;
     const dupMatch = r3.body.match(/ya ingresado[^<]{0,100}/i);
     if (dupMatch) {
-        throw new Error(`Factura ${row.prefijo}-${row.numero} ya existe en Doors (${dupMatch[0].trim().slice(0, 120)})`);
+        dupAviso = dupMatch[0].trim().slice(0, 120);
+        const cont = camposDeFormulario(r3.body, 'formCont');
+        if (!cont || !('CONTINUA' in cont)) {
+            throw new Error(
+                `Factura ${row.prefijo}-${row.numero} ya existe en Doors (${dupAviso}) y no se ` +
+                `encontró el formulario de confirmación para continuar.`);
+        }
+        r3 = await s.post(`${lqf}/fac-pan3.php`, { ...cont, CONTINUA: '1' });
+    }
+
+    // El ítem tiene que estar en la grilla. Se mide por el TOTAL al pie, no por buscar el
+    // número en el HTML: con el diálogo abierto ese número aparece igual dentro del
+    // formulario, así que el control viejo no habría detectado la cabecera vacía.
+    const total = totalGrilla(r3.body);
+    if (total == null || Math.abs(total - Number(importe)) > 0.01) {
+        throw doorsError(
+            `pan3 (el ítem no quedó cargado: la grilla totaliza ${total} y se esperaba ${importe}` +
+            `${dupAviso ? `; Doors avisó "${dupAviso}"` : ''})`, r3.body);
     }
 
     // pan4: primer POST muestra confirmación, segundo POST confirma
@@ -370,7 +469,7 @@ async function actualizarTasa(s, clienteCodigo, cesionNumero, tasa) {
 module.exports = {
     DoorsSession, lqfBase, parseDate, toDdMmYyyy, makeSupa,
     normalizarTipoOperacion, pan0Prog,
-    login, lookupFirmante, extraerCesionDePdf,
+    login, lookupFirmante, extraerCesionDePdf, netoGanancias, porcentajeIva, totalGrilla, camposDeFormulario,
     crearLiquidacion, descargarYSubirPdf, actualizarTasa,
     DOORS_USER,
 };
