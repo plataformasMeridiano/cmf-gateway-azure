@@ -177,28 +177,27 @@ const ALICUOTAS_IVA = [0, 2.5, 5, 10.5, 21, 27];
 const TOLERANCIA_ALICUOTA = 0.05;   // en puntos porcentuales
 
 /**
- * Porcentaje de IVA a partir del monto de IVA y el importe bruto de la factura.
+ * Porcentaje de IVA a partir del bruto y el neto de la factura, que es lo que Jira tiene
+ * cargado ("Monto" y "Monto Neto"). El campo IVA de Jira está vacío en todas, así que el
+ * porcentaje se deduce:
  *
- *   neto = importe - montoIva          (lo que no es IVA)
- *   %    = montoIva / neto * 100
+ *   %  = (bruto - neto) / neto * 100
  *
- * Devuelve null si no hay IVA (monto 0 o ausente) ⇒ el campo va vacío, como lo deja la
- * pantalla por defecto.
+ * Devuelve null cuando no hay IVA —falta alguno de los dos, o son iguales— ⇒ el campo va
+ * vacío, como lo deja la pantalla por defecto.
  *
  * Si el resultado no cae cerca de ninguna alícuota **no se fuerza**: una factura con dos
  * alícuotas mezcladas da un porcentaje intermedio que es legítimo, y además es el único
  * que reproduce el neto correcto (el % se dedujo justamente para que dé ese neto).
  * Redondearlo a 21 movería la base de la retención de verdad.
  */
-function porcentajeIva(montoIva, importeBruto) {
-    const iva = Number(montoIva) || 0;
-    const imp = Number(importeBruto) || 0;
-    if (iva <= 0 || imp <= 0) return null;
+function porcentajeIva(bruto, neto) {
+    const b = Number(bruto) || 0;
+    const n = Number(neto)  || 0;
+    if (b <= 0 || n <= 0 || b === n) return null;
+    if (n > b) throw new Error(`El neto (${n}) no puede ser mayor que el bruto (${b})`);
 
-    const neto = imp - iva;
-    if (neto <= 0) throw new Error(`El IVA (${iva}) no puede ser mayor o igual al importe (${imp})`);
-
-    const crudo = (iva / neto) * 100;
+    const crudo = ((b - n) / n) * 100;
     const cerca = ALICUOTAS_IVA.find(a => Math.abs(crudo - a) <= TOLERANCIA_ALICUOTA);
     return cerca ?? Math.round(crudo * 100) / 100;
 }
@@ -349,10 +348,10 @@ async function crearLiquidacion(s, lqf, row) {
     }
 
     const importe = row.importe_efectivo ?? row.importe_original;
-    // El % se deriva del importe ORIGINAL de la factura, que es al que corresponde el monto
-    // de IVA. Después se aplica sobre el importe que realmente va a Doors (el efectivo, ya
-    // descontadas las NC/ND), así la alícuota queda bien y el neto escala con el importe.
-    const poriva  = porcentajeIva(row.monto_iva, row.importe_original);
+    // El % se deriva del bruto y el neto de la FACTURA, que es a lo que corresponden esos
+    // dos montos. Después se aplica sobre el importe que realmente va a Doors (el efectivo,
+    // ya descontadas las NC/ND), así la alícuota queda bien y el neto escala con el importe.
+    const poriva  = porcentajeIva(row.monto_bruto, row.monto_neto);
 
     const camposItem = {
         id: recId, CONF: '1', ABM: 'A', ABMITEM: '', ITEM: '', SCROLL: '',
