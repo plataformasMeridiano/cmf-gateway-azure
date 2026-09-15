@@ -216,7 +216,35 @@ app.http('cesion-execute', {
                         fecha_emision_ddmmyyyy:   factura.fecha_emision_ddmmyyyy   || isoToDdMmYyyy(factura.fecha_emision),
                     };
 
-                    const result = await crearLiquidacion(s, lqf, rowParaDoors);
+                    // Doors avisa "ya ingresado" sin filtrar por cliente, así que la
+                    // advertencia puede ser de la factura de otro comitente. Acá se resuelve
+                    // consultando nuestra propia base: si la factura ya está registrada por
+                    // nosotros es un duplicado real y se corta; si no, se sigue.
+                    //
+                    // La consulta corre entre pan3 y pan4 — el único momento en que sirve.
+                    // Si tira, `crearLiquidacion` descarta el alta antes de confirmarla:
+                    // una vez confirmada ya no se deshace y hay que anularla a mano.
+                    const onDupWarning = async (aviso) => {
+                        const { data: prevRows } = await supa
+                            .from('doors_liquidaciones_facturas')
+                            .select('id, jira_factura_key, doors_liq_numero, status')
+                            .eq('sociedad', factura.sociedad)
+                            .eq('letra',    factura.letra)
+                            .eq('prefijo',  factura.prefijo)
+                            .eq('numero',   factura.numero);
+
+                        const prev = (prevRows || []).find(
+                            r => r.id !== factura.id && !['error', 'error_probe'].includes(r.status));
+                        if (prev) {
+                            throw new Error(
+                                `Factura ya registrada por nosotros en Doors ` +
+                                `(liq. ${prev.doors_liq_numero}, ${prev.jira_factura_key})`);
+                        }
+                        context.log(`Advertencia Doors "${aviso}" en ${factura.jira_factura_key}: ` +
+                                    `no está en nuestra base, se continúa`);
+                    };
+
+                    const result = await crearLiquidacion(s, lqf, rowParaDoors, onDupWarning);
                     recId        = result.recId;
                     const { liqNum } = result;
                     context.log(`Liquidación creada para ${factura.jira_factura_key}:`, liqNum);

@@ -319,7 +319,15 @@ function extraerCesionDePdf(buf) {
     return m ? parseInt(m[1], 10) : null;
 }
 
-async function crearLiquidacion(s, lqf, row) {
+/**
+ * Alta de una liquidación de facturas en Doors.
+ *
+ * `onDupWarning` decide qué hacer con la advertencia "ya ingresado": se la llama con el
+ * texto del aviso y, si tira, el alta se corta **sin confirmar**. Es opcional solo para no
+ * romper a un caller que no la pase — sin ella la advertencia corta igual, que es el
+ * default seguro.
+ */
+async function crearLiquidacion(s, lqf, row, onDupWarning) {
     const esFactoraje = row.tipo_operacion === 'factoraje';
     const r0  = await s.post(`${lqf}/${pan0Prog(row.tipo_operacion)}`, { CONF: '1' });
     const m0  = r0.url.match(/[?&]id=(\d+)/);
@@ -383,12 +391,38 @@ async function crearLiquidacion(s, lqf, row) {
     // OJO: un intento anterior (b730dd7, revertido) se limitó a NO tirar el error y siguió
     // derecho a pan4. Doors quedó esperando la respuesta, el ítem nunca entró, y se
     // confirmaron cabeceras vacías: las liq 48376 y 48377 quedaron con importe 0.
+    // Descarta el alta abierta. Hace falta acá porque por los caminos de error de abajo
+    // `crearLiquidacion` no llega a devolver el recId, así que el rollback del caller no se
+    // entera y el registro quedaría colgado en Doors.
+    const descartar = async () => {
+        try { await s.get(`${lqf}/${pan0Prog(row.tipo_operacion)}?id=${recId}&atras=1`); } catch {}
+    };
+
     let dupAviso = null;
     const dupMatch = r3.body.match(/ya ingresado[^<]{0,100}/i);
     if (dupMatch) {
         dupAviso = dupMatch[0].trim().slice(0, 120);
+
+        // Primero se pregunta, después se contesta. Doors no filtra por cliente, así que el
+        // aviso puede ser de la factura de otro; quién decide es el caller. La consulta va
+        // ANTES de responder el diálogo y antes de pan4: una vez confirmada, la liquidación
+        // ya no se deshace con `atras` y hay que anularla a mano.
+        try {
+            if (!onDupWarning) {
+                throw new Error(`Factura ${row.prefijo}-${row.numero} ya existe en Doors (${dupAviso})`);
+            }
+            await onDupWarning(dupAviso);
+        } catch (e) {
+            await descartar();
+            throw e;
+        }
+
+        // No es nuestra ⇒ se responde que sí. Doors NO agrega el ítem hasta que se conteste:
+        // re-postear con CONTINUA=1 es lo que hace el botón "Sí", que submitea `formCont`,
+        // un espejo oculto de `formItem`. Se reenvían los campos tal como los devolvió Doors.
         const cont = camposDeFormulario(r3.body, 'formCont');
         if (!cont || !('CONTINUA' in cont)) {
+            await descartar();
             throw new Error(
                 `Factura ${row.prefijo}-${row.numero} ya existe en Doors (${dupAviso}) y no se ` +
                 `encontró el formulario de confirmación para continuar.`);
@@ -399,8 +433,13 @@ async function crearLiquidacion(s, lqf, row) {
     // El ítem tiene que estar en la grilla. Se mide por el TOTAL al pie, no por buscar el
     // número en el HTML: con el diálogo abierto ese número aparece igual dentro del
     // formulario, así que el control viejo no habría detectado la cabecera vacía.
+    //
+    // Este control es el que faltó en el intento de agosto (b730dd7, revertido en abb35dc):
+    // ahí se ignoraba la advertencia sin contestarla, Doors nunca agregaba el ítem y pan4
+    // confirmaba una cabecera vacía — las liq 48376 y 48377 quedaron con importe 0.
     const total = totalGrilla(r3.body);
     if (total == null || Math.abs(total - Number(importe)) > 0.01) {
+        await descartar();
         throw doorsError(
             `pan3 (el ítem no quedó cargado: la grilla totaliza ${total} y se esperaba ${importe}` +
             `${dupAviso ? `; Doors avisó "${dupAviso}"` : ''})`, r3.body);
