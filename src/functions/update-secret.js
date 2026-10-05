@@ -47,6 +47,38 @@ const ALLOWED_SECRETS = new Set([
 
 const kvClient = new SecretClient(VAULT_URL, new ManagedIdentityCredential());
 
+/**
+ * Auditoría: una fila en `rotacion_secrets` (Supabase) por cada intento de
+ * escritura — ok, rechazado por whitelist o error del vault. NUNCA el valor.
+ *
+ * Venía del prototipo KeyVaultUpdater y se perdió al pasar update-secret a
+ * cmf-gateway: hasta 2026-10 la tabla estaba vacía y no había traza de ninguna
+ * rotación. Best-effort: si Supabase falla, la rotación no se corta.
+ */
+async function auditar(context, issueKey, secretName, status, errorMsg = null) {
+  const { SUPABASE_URL, SUPABASE_KEY } = process.env;
+  if (!SUPABASE_URL || !SUPABASE_KEY) {
+    context.warn("Auditoría deshabilitada: faltan SUPABASE_URL / SUPABASE_KEY");
+    return;
+  }
+  try {
+    const r = await fetch(`${SUPABASE_URL}/rest/v1/rotacion_secrets`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        apikey: SUPABASE_KEY,
+        Authorization: `Bearer ${SUPABASE_KEY}`,
+        Prefer: "return=minimal",
+      },
+      body: JSON.stringify({ issue_key: issueKey || null, secret_name: secretName, status, error_msg: errorMsg }),
+      signal: AbortSignal.timeout(5000),
+    });
+    if (!r.ok) context.warn(`Auditoría: Supabase respondió ${r.status}: ${(await r.text()).slice(0, 200)}`);
+  } catch (e) {
+    context.warn(`Auditoría: no se pudo registrar en Supabase: ${e.message}`);
+  }
+}
+
 app.http("update-secret", {
   methods: ["POST"],
   authLevel: "function",
@@ -60,6 +92,7 @@ app.http("update-secret", {
 
     const secretName = (body.secret_name ?? "").trim().toUpperCase();
     const secretValue = (body.secret_value ?? "").trim();
+    const issueKey = String(body.issueKey ?? "").trim();   // ticket de CONF, o etiqueta de una carga manual
 
     if (!secretName || !secretValue) {
       return { status: 400, jsonBody: { error: "secret_name y secret_value son requeridos" } };
@@ -82,12 +115,17 @@ app.http("update-secret", {
       isDocumentoDeSecretPermitido;
 
     if (!isAllowed) {
-      return { status: 403, jsonBody: { error: `'${secretName}' no está en la lista de secrets permitidos` } };
+      const msg = `'${secretName}' no está en la lista de secrets permitidos`;
+      await auditar(context, issueKey, secretName, "rechazado", msg);
+      return { status: 403, jsonBody: { error: msg } };
     }
 
     try {
       await kvClient.setSecret(secretName, secretValue);
-      context.log(`Secret '${secretName}' actualizado OK`);
+      context.log(`[${issueKey || "-"}] Secret '${secretName}' actualizado OK`);
+      // Se audita antes de republicar Confluence: la rotación ya está hecha y la
+      // republicación puede tardar o fallar sin que eso cambie el resultado.
+      await auditar(context, issueKey, secretName, "ok");
 
       // Republicar la página de Confluence que corresponda (ALYCs o Bancos).
       // Best-effort: si falla, la rotación ya está hecha y no se reporta error;
@@ -105,6 +143,7 @@ app.http("update-secret", {
       return { status: 200, jsonBody: { ok: true, secret: secretName, page_refresh: pageRefresh } };
     } catch (err) {
       context.error(`Error actualizando '${secretName}':`, err);
+      await auditar(context, issueKey, secretName, "error", err.message);
       return { status: 500, jsonBody: { error: err.message } };
     }
   },
